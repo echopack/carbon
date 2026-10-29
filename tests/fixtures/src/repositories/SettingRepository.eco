@@ -1,0 +1,11 @@
+namespace fixtures;
+
+public class SettingRepository : carbon::Repository<Setting, SettingQuery, string>
+{
+    public carbon::Connection $db;
+
+    public function query() : SettingQuery
+    {
+        return SettingQuery($this->db);
+    }
+}

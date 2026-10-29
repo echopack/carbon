@@ -1,0 +1,229 @@
+use carbon::{One, Many};
+use carbon::relation::{Keys, Index};
+use hydrahon::Value;
+use fixtures::{World, Note, Tag, TagQuery, NoteQuery, NoteLoad, NoteRepository, NoteTagsRelation, TagNoteRelation, TagTable, noteRow, tagRow, selectNotes, selectTags, message};
+
+test slots_start_unloaded
+{
+    One<Note> $one = .unloaded();
+    assert(!$one->loaded());
+    assert($one->get() == null);
+    Many<Tag> $many = .unloaded();
+    assert(!$many->loaded());
+    assert($many->count() == 0);
+}
+
+test keys_are_distinct_in_first_seen_order
+{
+    Keys<int64> $k = Keys<int64>();
+    assert($k->empty());
+    $k->add(3);
+    $k->add(1);
+    $k->add(3);
+    assert($k->list()->count() == 2);
+    assert($k->list()[0] == 3 && $k->list()[1] == 1);
+}
+
+test index_groups_by_key
+{
+    Index<int64, string> $i = Index<int64, string>();
+    $i->add(1, 'a');
+    $i->add(2, 'b');
+    $i->add(1, 'c');
+    assert($i->all(1)->count() == 2);
+    assert(($i->first(2) ?? '') == 'b');
+    assert($i->first(9) == null);
+    assert($i->all(9)->count() == 0);
+}
+
+test has_many_loads_with_one_query
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b'), noteRow(3, 'c')]);
+    $w->fake->rows([tagRow(10, 1, 'x'), tagRow(11, 3, 'y'), tagRow(12, 1, 'z')]);
+    array<Note> $notes = guard $w->notes->find()->withTags()->get();
+    assert($w->fake->count() == 2);
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?, ?, ?)'));
+    assert($notes[0]->tags->loaded() && $notes[0]->tags->count() == 2);
+    assert($notes[0]->tags->get()[1]->name == 'z');
+    assert($notes[1]->tags->loaded() && $notes[1]->tags->count() == 0);
+    assert($notes[2]->tags->get()[0]->id == 11);
+    // loaded children are linked models too
+    assert($notes[2]->tags->get()[0]->link->persisted());
+}
+
+test no_parents_no_query
+{
+    $w = World();
+    array<Note> $none = [];
+    guard $w->notes->load()->withTags()->into($none);
+    assert($w->fake->count() == 0);
+}
+
+test belongs_to_fills_each_child
+{
+    $w = World();
+    $w->fake->rows([tagRow(10, 1, 'x'), tagRow(11, 7, 'y'), tagRow(12, 1, 'z')]);
+    $w->fake->rows([noteRow(1, 'parent')]);
+    array<Tag> $tags = guard $w->tags->all();
+    guard $w->tags->load()->withNote()->into($tags);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?, ?) AND `notes`.`deleted_at` IS NULL'));
+    Note $p = guard $tags[0]->note->get();
+    assert($p->title == 'parent');
+    assert($tags[1]->note->loaded());
+    assert($tags[1]->note->get() == null);
+    Note $same = guard $tags[2]->note->get();
+    assert($same->id == 1);
+    // both children share the one loaded parent
+    $same->title = 'renamed';
+    assert($p->title == 'renamed');
+}
+
+test first_loads_relations_too
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'only')])->rows([tagRow(10, 4, 'x')]);
+    Note $n = guard $w->notes->find()->withTags()->one();
+    assert($n->tags->count() == 1);
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?)'));
+}
+
+test relations_nest_one_query_per_level
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    $w->fake->rows([tagRow(10, 1, 'x'), tagRow(11, 2, 'y'), tagRow(12, 1, 'z')]);
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    // a relation of a relation: the constraint asks the related query for its own relation
+    array<Note> $notes = guard $w->notes->find()->withTags(function(TagQuery $q) : TagQuery {
+        return $q->withNote();
+    })->get();
+    assert($w->fake->count() == 3);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?, ?) AND `notes`.`deleted_at` IS NULL'));
+    Note $back = guard $notes[1]->tags->get()[0]->note->get();
+    assert($back->title == 'b');
+    assert($notes[0]->tags->get()[1]->note->loaded());
+}
+
+test a_nested_level_without_rows_runs_no_query
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')])->rows([]);
+    // nested through the relation classes themselves, the way a hand-written relation would
+    array<Note> $notes = guard $w->notes->find()->with(NoteTagsRelation()->with(TagNoteRelation()))->get();
+    assert($w->fake->count() == 2);
+    assert($notes[0]->tags->loaded() && $notes[0]->tags->count() == 0);
+}
+
+test a_relation_takes_conditions
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')])->rows([]);
+    guard $w->notes->find()->with(NoteTagsRelation()->where(TagTable::$name == 'x'))->get();
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?) AND `tags`.`name` = ?'));
+    assert($w->fake->sent(1, [Value::from(1), Value::from('x')]));
+}
+
+test a_relation_starts_from_a_ready_query
+{
+    $w = World();
+    TagQuery $named = $w->tags->find()->where(TagTable::$name == 'x')->order(asc: TagTable::$name);
+    $w->fake->rows([noteRow(1, 'a')])->rows([]);
+    guard $w->notes->find()->with(NoteTagsRelation()->from($named))->get();
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`name` = ? AND `tags`.`note_id` IN (?) ORDER BY `tags`.`name` ASC'));
+    // the ready query itself is left alone
+    $w->fake->rows([]);
+    guard $named->get();
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`name` = ? ORDER BY `tags`.`name` ASC'));
+    // a scope on the ready query applies: soft deleted parents too
+    $w->fake->rows([tagRow(10, 1, 'x')])->rows([]);
+    guard $w->tags->find()->with(TagNoteRelation()->from($w->notes->find()->scope(.all)))->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?)'));
+}
+
+test a_callback_changes_the_related_query
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')])->rows([]);
+    guard $w->notes->find()->with(NoteTagsRelation()->constrain(function(TagQuery $q) : TagQuery {
+        return $q->where(TagTable::$name != 'hidden')->order(asc: TagTable::$name);
+    })->where(TagTable::$name == 'x'))->get();
+    // keys first, then terms, then what the callback added
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?) AND `tags`.`name` = ? AND `tags`.`name` <> ? ORDER BY `tags`.`name` ASC'));
+    assert($w->fake->sent(1, [Value::from(1), Value::from('x'), Value::from('hidden')]));
+    // on a relation built elsewhere, a callback can widen the scope
+    $w->fake->rows([tagRow(10, 1, 'x')])->rows([]);
+    guard $w->tags->find()->with(TagNoteRelation()->constrain(function(NoteQuery $q) : NoteQuery {
+        return $q->scope(.all);
+    }))->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?)'));
+    // the related query's own scopes work in a callback
+    $w->fake->rows([tagRow(10, 1, 'x')])->rows([]);
+    guard $w->tags->find()->withNote(function(NoteQuery $q) : NoteQuery {
+        return $q->pinned();
+    })->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?) AND `notes`.`pinned` AND `notes`.`deleted_at` IS NULL'));
+}
+
+test a_relation_loaded_twice_runs_the_same_query
+{
+    $w = World();
+    NoteLoad $load = $w->notes->load()->withTags(function(TagQuery $q) : TagQuery {
+        return $q->where(TagTable::$name == 'x');
+    });
+    array<Note> $notes = [Note($id: 1, $title: 'a')];
+    $w->fake->rows([])->rows([]);
+    guard $load->into($notes);
+    string $first = $w->fake->last();
+    guard $load->into($notes);
+    assert($w->fake->last() == $first);
+    assert($first == selectTags(' WHERE `tags`.`note_id` IN (?) AND `tags`.`name` = ?'));
+}
+
+test filling_several_relations_runs_one_query_each
+{
+    $w = World();
+    array<Tag> $tags = [Tag($id: 10, $noteId: 1, $name: 'x'), Tag($id: 11, $noteId: 2, $name: 'y')];
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    guard $w->tags->load()->withNote()->into($tags);
+    assert($w->fake->count() == 1);
+    Note $first = guard $tags[0]->note->get();
+    assert($first->title == 'a');
+    // nesting works in hand too: the notes of the tags, and their tags
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')])->rows([tagRow(10, 1, 'x')]);
+    guard $w->tags->load()->withNote(function(NoteQuery $q) : NoteQuery {
+        return $q->withTags();
+    })->into($tags);
+    assert($w->fake->count() == 3);
+    Note $again = guard $tags[0]->note->get();
+    assert($again->tags->loaded() && $again->tags->count() == 1);
+}
+
+test a_relation_starts_from_the_registered_repository
+{
+    $w = World();
+    // the note repository narrows every query it starts; loading notes as a relation goes through it
+    $w->notes->pinnedOnly = true;
+    $w->fake->rows([tagRow(10, 1, 'x')])->rows([]);
+    guard $w->tags->find()->withNote()->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`id` IN (?) AND `notes`.`deleted_at` IS NULL'));
+}
+
+/**
+ * Loads tags for a note on a database where only the note repository is registered.
+ */
+function loadUnregistered() : void
+{
+    carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
+    $fake->rows([tagRow(10, 1, 'x')]);
+    carbon::Db $db = carbon::Db($fake);
+    $db->register(NoteRepository($db->connection()));
+    array<Note> $list = [Note($id: 1, $title: 'a')];
+    guard $db->repo<NoteRepository>()->load()->withTags()->into($list);
+}
+
+#[tests: expects death]
+test a_relation_to_a_model_without_a_registered_repository_stops
+{
+    loadUnregistered();
+}

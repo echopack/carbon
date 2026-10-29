@@ -1,0 +1,37 @@
+namespace carbongen;
+
+/**
+ * Which way a relation points.
+ */
+public enum Direction : uint8
+{
+    case belongsTo = 0;
+    case hasOne = 1;
+    case hasMany = 2;
+
+    /**
+     * The attribute that marks it: `#[carbon::belongsTo: 'authorId']`.
+     */
+    public const function tool() : string
+    {
+        return match ($this) {
+            Direction::belongsTo => 'belongsTo',
+            Direction::hasOne => 'hasOne',
+            Direction::hasMany => 'hasMany',
+        };
+    }
+
+    /**
+     * Every direction field `$f` is marked with.
+     */
+    public static function marked(const json::Value& $f) : array<Direction>
+    {
+        array<Direction> $out = [];
+        foreach ([Direction::belongsTo, Direction::hasOne, Direction::hasMany] as $d) {
+            if (Json::has($f, $d->tool())) {
+                $out[] = $d;
+            }
+        }
+        return $out;
+    }
+}

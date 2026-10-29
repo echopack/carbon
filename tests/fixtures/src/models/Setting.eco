@@ -1,0 +1,15 @@
+namespace fixtures;
+
+use carbon::Link;
+
+public class Setting : carbon::Model<Setting, SettingRepository>
+{
+    public Link<SettingRepository> $link = .detached();
+    public string $name;
+    public string $value;
+
+    public function link() : Link<SettingRepository>&
+    {
+        return $this->link;
+    }
+}

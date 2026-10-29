@@ -1,0 +1,70 @@
+namespace carbon;
+
+/**
+ * Why a column could not be read into its field.
+ */
+public enum Problem
+{
+    /**
+     * The column is NULL but the field is not nullable.
+     */
+    case absent;
+
+    /**
+     * The column holds a different kind of value than the field.
+     */
+    case mismatch;
+
+    /**
+     * The value does not fit the field's integer width.
+     */
+    case range;
+
+    /**
+     * No case of the field's enum is backed by the value.
+     */
+    case unknown;
+
+    /**
+     * A `Codec` refused the value, with its reason.
+     */
+    case codec(string $reason);
+
+    /**
+     * Why column `$at` of the current row did not read: NULL, or another kind of value.
+     */
+    public static function of(const Cursor& $row, usize $at) : Problem
+    {
+        if ($row->isNull($at)) {
+            return .absent;
+        }
+        return .mismatch;
+    }
+}
+
+namespace str;
+
+/**
+ * What went wrong reading a column, in a few words.
+ */
+public function from(const carbon::Problem& $p) : string
+{
+    match ($p) {
+        carbon::Problem::absent => {
+            return 'is NULL but the field is not nullable';
+        },
+        carbon::Problem::mismatch => {
+            return 'holds another kind of value than the field';
+        },
+        carbon::Problem::range => {
+            return 'does not fit the field';
+        },
+        carbon::Problem::unknown => {
+            return 'matches no enum case';
+        },
+        carbon::Problem::codec($reason) => {
+            return "was refused by its codec: {$reason}";
+        },
+    };
+    return '';
+}

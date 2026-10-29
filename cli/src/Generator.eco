@@ -1,0 +1,114 @@
+/**
+ * The pipeline `carbongen` runs in a module directory: the decls pass, the
+ * checks, the file.
+ *
+ * The decls pass defines CARBON_NOGEN, which the module's manifest uses to
+ * leave `.carbon/` out, so a stale generated file can never stop the next
+ * one from being written. Code that uses the generated tables fails to
+ * compile in that pass; echoc still prints every declaration, so its
+ * complaints are kept back unless the pass printed nothing usable.
+ */
+
+namespace carbongen;
+
+use std::io;
+
+public class Generator
+{
+    public string $echoc = 'echoc';
+    // the manifest check, the wiring hint and the messages spell out `.carbon/` as well
+    public const string $target = '.carbon/models.eco';
+    public bool $quiet = false;
+
+    /**
+     * Read the module and render the generated file, or say why not.
+     */
+    public function render() : result<string, Failure>
+    {
+        string $manifest = Sys::read('module.eco');
+        if ($manifest->empty()) {
+            return .error(.input('no module.eco here; run carbongen in the module that declares the models'));
+        }
+        if ($manifest->contains('.carbon/') == false || $manifest->contains('CARBON_NOGEN') == false) {
+            return .error(.input(Generator::wiring()));
+        }
+        json::Value $decls = guard $this->decls() else ($e) {
+            return .error($e);
+        }
+        Schema $schema = Schema::read($decls);
+        if ($schema->problems->count() > 0) {
+            foreach ($schema->problems as const &$p) {
+                io::eprintln("error: {$p}");
+            }
+            return .error(.problems($schema->problems->count() as int32));
+        }
+        $this->say("carbongen  {$schema->models->count()} model(s)");
+        return .ok(Emitter($schema)->render());
+    }
+
+    /**
+     * Write the generated file. Unchanged content is left alone, so echoc's
+     * cache stays warm.
+     */
+    public function generate() : status<Failure>
+    {
+        string $text = guard $this->render() else ($e) {
+            return .error($e);
+        }
+        result<bool, io::ioerror> $made = io::mkdir('.carbon');
+        if ($made->failed() && $made->failure()->exists() == false) {
+            return .error(.input('could not create .carbon/'));
+        }
+        if (Sys::put($this->target, $text) == false) {
+            return .error(.input("could not write {$this->target}"));
+        }
+        $this->say("wrote      {$this->target}");
+        return .ok;
+    }
+
+    /**
+     * Whether the generated file is what generating would write now.
+     */
+    public function check() : status<Failure>
+    {
+        string $text = guard $this->render() else ($e) {
+            return .error($e);
+        }
+        if (Sys::read($this->target) != $text) {
+            return .error(.stale);
+        }
+        $this->say("current    {$this->target}");
+        return .ok;
+    }
+
+    private function decls() : result<json::Value, Failure>
+    {
+        array<string> $args = ['build', '-p', 'decls', '--define', 'CARBON_NOGEN', '-o', 'ecobuild/carbongen-decls'];
+        std::process::output $run = guard std::process::command($this->echoc, $args)->output() else ($e) {
+            return .error(.input("could not run {$this->echoc}: {$e->message()}; pass --echoc <path> or set $ECHOC"));
+        }
+        json::Value $decls = guard json::parse($run->stdout) else {
+            return .error(.tool("{$run->status}", $run->stderr));
+        }
+        if (Json::items($decls, 'modules')->count() == 0) {
+            return .error(.tool("{$run->status}", $run->stderr));
+        }
+        return .ok($decls);
+    }
+
+    private function say(const string& $text) : void
+    {
+        if ($this->quiet == false) {
+            io::println($text);
+        }
+    }
+
+    private static function wiring() : string
+    {
+        string $out = "module.eco does not include .carbon/ behind CARBON_NOGEN. add:\n\n";
+        $out->append("#[if: !CARBON_NOGEN]\n");
+        $out->append("#[sources: \".carbon/*.eco\"]\n");
+        $out->append('#[end]');
+        return $out;
+    }
+}

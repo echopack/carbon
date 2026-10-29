@@ -1,0 +1,37 @@
+namespace carbongen;
+
+/**
+ * app::Note: a tree, each note under an optional parent, with its replies and one pinned
+ * reply found through the same nullable key.
+ */
+internal function tree() : string
+{
+    array<string> $more = [
+        field('parentId', 3, optional(prim('int64')), ''),
+        field('parent', 4, named('carbon::One', named('app::Note', '')), tool('belongsTo', 'parentId'), true),
+        field('replies', 5, named('carbon::Many', named('app::Note', '')), tool('hasMany', 'parentId'), true),
+        field('pinned', 6, named('carbon::One', named('app::Note', '')), tool('hasOne', 'parentId'), true),
+    ];
+    return model('app::Note', 'notes', 1, 'app::NoteRepository', $more);
+}
+
+test a_has_many_through_a_nullable_key
+{
+    string $out = emitted(tree());
+    // the children are picked by their nullable key, and only the ones that have it are indexed
+    assert($out->contains("public class NoteRepliesRelation : carbon::Eager<app::Note>"));
+    assert($out->contains('            app::NoteQuery $q = $this->fetch->query($db, app::NoteTable::$parentId in $keys->list());'));
+    assert($out->contains("        foreach ($found as const &$f) \{\n            if ($f->parentId != null) \{\n                int64 $k = guard $f->parentId;\n                $by->add($k, $f);\n            }\n        }"));
+    assert($out->contains('            $m->replies->set($by->all($m->id));'));
+    assert($out->contains('            $m->pinned->set($by->first($m->id));'));
+}
+
+test a_belongs_to_through_a_nullable_key
+{
+    string $out = emitted(tree());
+    // a model without a parent adds no key and gets an empty slot
+    assert($out->contains("        foreach ($models as const &$m) \{\n            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                $keys->add($k);\n            }\n        }"));
+    assert($out->contains("            app::Note? $one = null;\n            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                $one = $by->first($k);\n            }\n            $m->parent->set($one);"));
+    // the parent is indexed by its own key, which is never null
+    assert($out->contains("        foreach ($found as const &$f) \{\n            $by->add($f->id, $f);\n        }"));
+}

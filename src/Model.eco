@@ -1,0 +1,103 @@
+namespace carbon;
+
+/**
+ * A model `M` kept by repository `R`. A conformer writes `link()`, handing out its link field,
+ * and gets the rest: `$post->save()`, `$post->delete()` and the others go through the
+ * repository the link points to, and answer `.detached` when there is none.
+ *
+ * ```echo
+ * #[carbon::model: 'posts']
+ * public class Post : carbon::Model<Post, PostRepository>
+ * {
+ *     public carbon::Link<PostRepository> $link = .detached();
+ *
+ *     #[carbon::key]
+ *     public int64 $id = 0;
+ *     public string $title;
+ *
+ *     public function link() : carbon::Link<PostRepository>&
+ *     {
+ *         return $this->link;
+ *     }
+ * }
+ * ```
+ */
+public interface Model<M, R>
+{
+    /**
+     * The model's link to its repository.
+     */
+    function link() : Link<R>&;
+
+    /**
+     * Insert the model if its row does not exist yet, otherwise write the columns that
+     * changed. A clean model runs no query.
+     */
+    function save() : status<Error>
+    {
+        // bound first: a chained $this->link()->repo() never gets its type in a default
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else ($e) { return .error($e); }
+        return $r->save($this);
+    }
+
+    /**
+     * Delete the model's row. A model with a soft delete column only gets it set.
+     */
+    function delete() : status<Error>
+    {
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else ($e) { return .error($e); }
+        return $r->delete($this);
+    }
+
+    /**
+     * Bring the soft deleted model back.
+     */
+    function restore() : status<Error>
+    {
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else ($e) { return .error($e); }
+        return $r->restore($this);
+    }
+
+    /**
+     * Remove the model's row for good, soft delete column or not.
+     */
+    function purge() : status<Error>
+    {
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else ($e) { return .error($e); }
+        return $r->purge($this);
+    }
+
+    /**
+     * A fresh copy of the model's row, soft deleted or not.
+     */
+    function fresh() : result<M, Error>
+    {
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else ($e) { return .error($e); }
+        return $r->fresh($this);
+    }
+
+    /**
+     * Whether the model has columns that differ from its row as last loaded or saved. A
+     * detached model has no row to differ from and is never dirty.
+     */
+    function dirty() : bool
+    {
+        Link<R>& $l = $this->link();
+        R $r = guard $l->repo() else { return false; }
+        return $r->dirty($this);
+    }
+
+    /**
+     * Whether the model's row exists in the database.
+     */
+    function persisted() : bool
+    {
+        Link<R>& $l = $this->link();
+        return $l->persisted();
+    }
+}

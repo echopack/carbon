@@ -1,0 +1,28 @@
+namespace carbon;
+
+/**
+ * The transaction statements, as listeners see them.
+ */
+internal enum Control : uint8
+{
+    case begin = 0;
+    case commit = 1;
+    case rollback = 2;
+
+    /**
+     * The statement as it was sent, for listeners and the fake.
+     */
+    internal const function statement() : Statement
+    {
+        return Statement(plain: $this->sql());
+    }
+
+    internal const function sql() : string
+    {
+        return match ($this) {
+            Control::begin => 'BEGIN',
+            Control::commit => 'COMMIT',
+            Control::rollback => 'ROLLBACK',
+        };
+    }
+}

@@ -1,0 +1,149 @@
+namespace carbon::fake;
+
+use hydrahon::Value;
+
+/**
+ * Rows of plain values, read the way a real driver reads them: integers answer `int`, `uint`
+ * and `bool`, so a test can write `1` for a boolean column the way MySQL sends it.
+ */
+internal class Cursor : carbon::Cursor
+{
+    internal array<array<Value>> $rows;
+    /**
+     * How many rows `step` moved past: the current row is the one before, none before the
+     * first step.
+     */
+    internal usize $next = 0;
+
+    public function step() : result<bool, Error>
+    {
+        if ($this->next >= $this->rows->count()) {
+            return .ok(false);
+        }
+        $this->next = $this->next + 1;
+        return .ok(true);
+    }
+
+    public const function isNull(usize $at) : bool
+    {
+        Value? $v = $this->value($at);
+        if ($v == null) {
+            return true;
+        }
+        Value $x = guard $v;
+        return $x->isNull();
+    }
+
+    public const function bool(usize $at) : bool?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::bool($x) => $x,
+            Value::int($x) => $x != 0,
+            Value::uint($x) => $x != 0,
+            else => null,
+        };
+    }
+
+    public const function int(usize $at) : int64?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::int($x) => $x,
+            Value::bool($x) => Cursor::bit($x),
+            else => null,
+        };
+    }
+
+    public const function uint(usize $at) : uint64?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::uint($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function float(usize $at) : float64?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::float($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function text(usize $at) : string?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::text($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function decimal(usize $at) : hydrahon::Decimal?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::decimal($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function bytes(usize $at) : hydrahon::Bytes?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::bytes($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function date(usize $at) : hydrahon::Date?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::date($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function datetime(usize $at) : hydrahon::DateTime?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::datetime($x) => $x,
+            else => null,
+        };
+    }
+
+    public const function time(usize $at) : hydrahon::Time?
+    {
+        Value $v = guard $this->value($at) else { return null; }
+        return match ($v) {
+            Value::time($x) => $x,
+            else => null,
+        };
+    }
+
+    internal const function value(usize $at) : Value?
+    {
+        if ($this->next == 0) {
+            return null;
+        }
+        const array<Value>& $row = $this->rows[$this->next - 1];
+        if ($at >= $row->count()) {
+            return null;
+        }
+        return $row[$at];
+    }
+
+    internal static function bit(bool $b) : int64
+    {
+        if ($b) {
+            return 1;
+        }
+        return 0;
+    }
+}

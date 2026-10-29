@@ -1,0 +1,108 @@
+namespace carbongen;
+
+/**
+ * One column: the field it comes from, its SQL name, and how the two meet.
+ */
+public struct Column
+{
+    public string $property;
+    public string $name;
+
+    /**
+     * The field's Echo type without `?`: `int32`, `blog::Status`, `array<string>`.
+     */
+    public string $inner;
+    public bool $nullable;
+
+    /**
+     * The `T` of the column's `hydrahon::Term<T>` without `?`: `int64`, `string`.
+     */
+    public string $base;
+    public Shape $shape;
+
+    /**
+     * The enum or the codec type, for `enumerated` and `codec`.
+     */
+    public string $via;
+
+    /**
+     * The enum's backing type, for `enumerated`.
+     */
+    public string $backing;
+
+    /**
+     * Whether the field is `const`: carbon may read it, never assign it.
+     */
+    public bool $fixed = false;
+
+    /**
+     * The field type as written: `int32?`.
+     */
+    public const function field() : string
+    {
+        if ($this->nullable) {
+            return "{$this->inner}?";
+        }
+        return $this->inner;
+    }
+
+    /**
+     * The `T` of `hydrahon::Term<T>`.
+     */
+    public const function term() : string
+    {
+        if ($this->nullable) {
+            return "{$this->base}?";
+        }
+        return $this->base;
+    }
+
+    /**
+     * The `carbon::Cursor` method that reads the stored value.
+     */
+    public const function reader() : string
+    {
+        return Kinds::reader($this->base);
+    }
+
+    /**
+     * Whether the table holds this column as a generated enum column rather than a bare
+     * term, so conditions compare it with the enum's cases. Nullable enums keep the term.
+     */
+    public const function typed() : bool
+    {
+        return $this->shape == Shape::enumerated && !$this->nullable;
+    }
+
+    /**
+     * The generated enum column type: `blog::Status` gets `StatusColumn`.
+     */
+    public const function columnClass() : string
+    {
+        $local = Names::local($this->via);
+        return "{$local}Column";
+    }
+
+    /**
+     * The table's type for this column.
+     */
+    public const function declared() : string
+    {
+        if ($this->typed()) {
+            return $this->columnClass();
+        }
+        return "hydrahon::Term<{$this->term()}>";
+    }
+
+    /**
+     * The column's term as a method of table `$handle` reaches it: `PostTable::$status->term`
+     * for a typed column, `PostTable::$title` for the others.
+     */
+    public const function reach(const string& $handle) : string
+    {
+        if ($this->typed()) {
+            return "{$handle}::${$this->property}->term";
+        }
+        return "{$handle}::${$this->property}";
+    }
+}

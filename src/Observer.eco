@@ -1,0 +1,13 @@
+namespace carbon;
+
+/**
+ * Hooks around every write of one model type, for what cuts across repositories: an audit
+ * trail, a cache to drop. `before` may change the model or refuse the write with `.refused`;
+ * `after` only hears about it. Register one with `$repository->observe(...)`. A repository's own
+ * `before`/`after` run first and last, around every observer.
+ */
+public interface Observer<M>
+{
+    function before(Event $event, M& $model) : status<Error>;
+    function after(Event $event, const M& $model) : void;
+}

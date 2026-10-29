@@ -1,0 +1,58 @@
+use carbon::{Fault, Error};
+
+function server(mysql::ErrorCode $code, const string& $state) : mysql::Error
+{
+    return .server(mysql::ServerError($code, $state, 'refused'));
+}
+
+function fault(const Error& $e) : Fault
+{
+    return $e->fault();
+}
+
+test errors_map_onto_faults
+{
+    assert(fault(carbon::mysql::Driver::failure(server(.dupEntry, '23000'))) == Fault::duplicate);
+    assert(fault(carbon::mysql::Driver::failure(server(.noReferencedRow, '23000'))) == Fault::reference);
+    assert(fault(carbon::mysql::Driver::failure(server(.rowIsReferenced, '23000'))) == Fault::reference);
+    assert(fault(carbon::mysql::Driver::failure(server(.badNull, '23000'))) == Fault::constraint);
+    assert(fault(carbon::mysql::Driver::failure(server(.deadlock, '40001'))) == Fault::deadlock);
+    assert(fault(carbon::mysql::Driver::failure(server(.lockWaitTimeout, 'HY000'))) == Fault::deadlock);
+    assert(fault(carbon::mysql::Driver::failure(server(.parse, '42000'))) == Fault::other);
+    mysql::Error $closed = .closed;
+    assert(fault(carbon::mysql::Driver::failure($closed)) == Fault::connection);
+}
+
+test errors_keep_state_and_code
+{
+    Error $e = carbon::mysql::Driver::failure(server(.dupEntry, '23000'));
+    assert($e->duplicate());
+    match ($e) {
+        Error::driver($f) => {
+            assert(($f->state ?? '') == '23000');
+            assert(($f->code ?? 0) == 1062);
+        },
+        else => {
+            assert(false);
+        },
+    };
+}
+
+test params_bind_every_kind
+{
+    hydrahon::Params $from = hydrahon::Params::from([
+        hydrahon::Value::none,
+        hydrahon::Value::from(true),
+        hydrahon::Value::from(7),
+        hydrahon::Value::uint(8),
+        hydrahon::Value::from(1.5),
+        hydrahon::Value::from(hydrahon::Decimal('9.99')),
+        hydrahon::Value::from('text'),
+        hydrahon::Value::from(hydrahon::Bytes('raw')),
+        hydrahon::Value::from(hydrahon::Date(2024, 2, 29)),
+        hydrahon::Value::from(hydrahon::DateTime(2024, 2, 29, 23, 59, 58, 1)),
+        hydrahon::Value::from(hydrahon::Time(false, 838, 59, 59, 0)),
+    ]);
+    mysql::Params $p = carbon::mysql::Params::of($from);
+    assert($p->count() == 11);
+}

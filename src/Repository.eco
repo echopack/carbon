@@ -1,0 +1,237 @@
+namespace carbon;
+
+/**
+ * A repository: the write side of model `M`, where its queries start, and the home of what an
+ * app does with it: named finders, domain operations, dependencies, and hooks around every
+ * write. `Q` is the model's query type and `K` its key type. A conformer is a class that writes
+ * `query()`; everything else here is a default, and a method of the same name replaces one. It
+ * is registered on a `Db` once, which makes it the repository its models link to:
+ * `$db->register(PostRepository($db->connection()))`.
+ *
+ * ```echo
+ * public class PostRepository : carbon::Repository<Post, PostQuery, int64>, PostLoading
+ * {
+ *     public carbon::Connection $db;
+ *
+ *     public function query() : PostQuery { return PostQuery($this->db); }
+ *
+ *     public function before(carbon::Event $event, Post& $post) : status<carbon::Error>
+ *     {
+ *         if ($event->saves()) {
+ *             $post->title = str::trim($post->title);
+ *         }
+ *         return .ok();
+ *     }
+ *
+ *     public function feed(const User& $author, uint64 $page) : result<array<Post>, carbon::Error>
+ *     {
+ *         return $this->find()->published()->by($author)->newest()->page($page, size: 10)->get();
+ *     }
+ * }
+ * ```
+ *
+ * `$posts->find()` starts a query, `$posts->get(42)` reads one model and `$posts->load()`, from
+ * the generated `PostLoading`, fills the relations of models already in hand:
+ * `$posts->load()->withAuthor()->withComments()->into($active)`. `$post->save()` and
+ * `$posts->save($post)` both run the hooks: a model links to the repository that adopted it.
+ */
+public interface Repository<M, Q, K>
+{
+    /**
+     * A query over the model's rows, ready for scopes and conditions: what a conformer writes,
+     * and what `find()` and every default here start from.
+     */
+    function query() : Q;
+
+    /**
+     * Start a query: `$posts->find()->published()->newest()->get()`.
+     */
+    function find() : Q
+    {
+        return $this->query();
+    }
+
+    /**
+     * Make this repository the one the models of `M` link to on its connection. `Db::register`
+     * calls it; a model read before it ran stops the program with a note saying so.
+     */
+    function adopt() : void
+    {
+        Q $q = $this->query();
+        $q->rows()->store->adopt($this);
+    }
+
+    /**
+     * Runs before every insert, update, delete and restore of a model, before the observers.
+     * It may change the model, or refuse the write with `.refused`. The default does nothing.
+     */
+    function before(Event $event, M& $model) : status<Error>
+    {
+        return .ok();
+    }
+
+    /**
+     * Runs after every write `before` let through, after the observers. The default does
+     * nothing.
+     */
+    function after(Event $event, const M& $model) : void
+    {
+    }
+
+    /**
+     * The connection the repository works on.
+     */
+    function connection() : Connection
+    {
+        return $this->query()->connection();
+    }
+
+    /**
+     * Insert `$model` and hand it back linked, with its generated key. A model whose row
+     * already exists is refused with `.persisted`; `save` writes its changes.
+     */
+    function create(M $model) : result<M, Error>
+    {
+        Q $q = $this->query();
+        guard $q->rows()->store->insert($model, $q->connection(), $this) else ($e) { return .error($e); }
+        return .ok($model);
+    }
+
+    /**
+     * Insert `$model` if its row does not exist yet, otherwise write the columns that changed.
+     * A clean model runs no query.
+     */
+    function save(M& $model) : status<Error>
+    {
+        Q $q = $this->query();
+        return $q->rows()->store->save($model, $q->connection(), $this);
+    }
+
+    /**
+     * Delete `$model`'s row. A model with a soft delete column only gets it set.
+     */
+    function delete(M& $model) : status<Error>
+    {
+        Q $q = $this->query();
+        return $q->rows()->store->delete($model, $q->connection(), $this);
+    }
+
+    /**
+     * Bring a soft deleted model back.
+     */
+    function restore(M& $model) : status<Error>
+    {
+        Q $q = $this->query();
+        return $q->rows()->store->restore($model, $q->connection(), $this);
+    }
+
+    /**
+     * Remove `$model`'s row for good, soft delete column or not.
+     */
+    function purge(M& $model) : status<Error>
+    {
+        Q $q = $this->query();
+        return $q->rows()->store->purge($model, $q->connection(), $this);
+    }
+
+    /**
+     * Link `$model` to this repository without saving it, so `$model->save()` can insert it
+     * later.
+     */
+    function attach(M& $model) : void
+    {
+        Q $q = $this->query();
+        $q->rows()->store->attach($model);
+    }
+
+    /**
+     * A fresh copy of `$model`'s row, soft deleted or not.
+     */
+    function fresh(const M& $model) : result<M, Error>
+    {
+        Q $q = $this->query();
+        return $q->scope(.all)->one($q->rows()->store->table->keyOf($model));
+    }
+
+    /**
+     * Whether `$model` has columns that differ from its row as last loaded or saved.
+     */
+    function dirty(M& $model) : bool
+    {
+        Q $q = $this->query();
+        return $q->rows()->store->dirty($model);
+    }
+
+    /**
+     * Run `$observer` around every write from now on, inside this repository's own hooks.
+     */
+    function observe(Observer<M> $observer) : void
+    {
+        Q $q = $this->query();
+        $q->rows()->store->observe(mv $observer);
+    }
+
+    function all() : result<array<M>, Error>
+    {
+        return $this->query()->get();
+    }
+
+    /**
+     * The model with key `$key`, null when there is none.
+     */
+    function get(K $key) : result<M?, Error>
+    {
+        return $this->query()->get($key);
+    }
+
+    /**
+     * The first model `$condition` matches, null when none does:
+     * `$users->get(UserTable::$email == 'boris@example.com')`. No order is implied; when several
+     * rows match, which one comes back is up to the database.
+     */
+    function get(hydrahon::Term<bool> $condition) : result<M?, Error>
+    {
+        return $this->query()->where($condition)->first();
+    }
+
+    /**
+     * The models with any of `$keys`, in no particular order. No keys, no query.
+     */
+    function many(const array<K>& $keys) : result<array<M>, Error>
+    {
+        return $this->query()->many($keys);
+    }
+
+    /**
+     * How many live rows there are.
+     */
+    function count() : result<uint64, Error>
+    {
+        return $this->query()->count();
+    }
+
+    /**
+     * Whether there is any live row.
+     */
+    function exists() : result<bool, Error>
+    {
+        return $this->query()->exists();
+    }
+
+    /**
+     * Call `$visit` with every live model as it is read. The rows are still streaming while it
+     * runs; a visitor that writes uses `each(batch:)`, see `Query::each`.
+     */
+    function each(function<status<Error>(M)> $visit) : status<Error>
+    {
+        return $this->query()->each($visit);
+    }
+
+    /**
+     * Call `$visit` with batches of up to `$size` live models, one query per batch.
+     */
+    function each(batch: uint64 $size, function<status<Error>(array<M>)> $visit) : status<Error>
+    {
+        return $this->query()->each(batch: $size, $visit);
+    }
+}

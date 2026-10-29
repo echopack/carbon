@@ -1,0 +1,46 @@
+namespace carbon::select;
+
+/**
+ * The computed fields a query selected, in the order they follow the model's columns. A query
+ * places the schema's slots once before it reads; a schema's `read` then asks where each of its
+ * slots landed.
+ */
+public struct Selected
+{
+    public array<Pick> $picks = [];
+    internal array<usize?> $slots = [];
+
+    /**
+     * Work out where each of `$names` (the schema's `computed()`, in order) sits in a row of a
+     * model with `$columns` columns, so `slot` is a lookup for every row that follows.
+     */
+    public function place(const array<string>& $names, usize $columns) : void
+    {
+        array<usize?> $out = [];
+        foreach ($names as const &$name) {
+            usize? $at = null;
+            usize $i = 0;
+            while ($i < $this->picks->count()) {
+                if ($this->picks[$i]->alias == $name) {
+                    $at = $columns + $i;
+                    break;
+                }
+                $i = $i + 1;
+            }
+            $out[] = $at;
+        }
+        $this->slots = mv $out;
+    }
+
+    /**
+     * Where the schema's computed field number `$slot` sits in the row, null when the query did
+     * not select it.
+     */
+    public const function slot(usize $slot) : usize?
+    {
+        if ($slot >= $this->slots->count()) {
+            return null;
+        }
+        return $this->slots[$slot];
+    }
+}

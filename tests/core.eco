@@ -1,0 +1,187 @@
+use carbon::{Db, Error, Failure};
+use carbon::change::{Changes, Snapshot};
+use carbon::listen::Log;
+use carbon::fake;
+use hydrahon::{Value, DateTime, Mysql};
+use fixtures::failure;
+
+test changes_marks
+{
+    Changes $all = Changes(all: 3);
+    assert($all->count() == 3);
+    assert($all->has(2));
+    assert(!$all->has(3));
+    $all->clear(1);
+    assert($all->count() == 2);
+    assert(!$all->has(1));
+
+    Changes $none = Changes(none: 4);
+    assert($none->empty());
+    $none->mark(3);
+    $none->mark(9);
+    assert($none->count() == 1);
+    assert($none->has(3));
+}
+
+test snapshot_changes_find_differences
+{
+    Snapshot $was = Snapshot([Value::from(1), Value::from('a'), Value::none, Value::from(DateTime(2024, 1, 2, 3, 4, 5))]);
+    Snapshot $same = Snapshot([Value::from(1), Value::from('a'), Value::none, Value::from(DateTime(2024, 1, 2, 3, 4, 5))]);
+    assert($was->changes($same)->empty());
+
+    Snapshot $now = Snapshot([Value::from(1), Value::from('b'), Value::from('x'), Value::from(DateTime(2024, 1, 2, 3, 4, 6))]);
+    Changes $c = $was->changes($now);
+    assert($c->count() == 3);
+    assert(!$c->has(0));
+    assert($c->has(1) && $c->has(2) && $c->has(3));
+}
+
+test snapshot_same_compares_kinds
+{
+    assert(Snapshot::same(Value::from(true), Value::from(true)));
+    assert(!Snapshot::same(Value::from(1), Value::uint(1)));
+    assert(!Snapshot::same(Value::none, Value::from(0)));
+    assert(Snapshot::same(Value::none, Value::none));
+    assert(Snapshot::same(Value::from(hydrahon::Decimal('1.50')), Value::from(hydrahon::Decimal('1.50'))));
+    assert(!Snapshot::same(Value::from(hydrahon::Bytes('a')), Value::from('a')));
+}
+
+test errors_read_well
+{
+    Error $missing = .missing;
+    assert(str::from($missing) == 'no matching row');
+    Error $col = .column('title', .absent);
+    assert(str::from($col) == 'column title is NULL but the field is not nullable');
+    Error $db = failure(.duplicate);
+    assert(str::from($db) == 'database error [23000]: refused by the fake');
+    assert($db->duplicate());
+    assert(!$db->retryable());
+    assert(!$missing->duplicate());
+    Error $dead = .driver(Failure(.deadlock, 'deadlock'));
+    assert($dead->retryable());
+    assert(str::from($dead) == 'database error: deadlock');
+}
+
+test fake_records_and_answers_in_order
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->written(2)->fails(.missing);
+    Db $db = Db($fake);
+    hydrahon::Table $t = hydrahon::Table(name: 'things');
+    hydrahon::Term<int64> $id = $t->column<int64>('id');
+    hydrahon::Delete $q = hydrahon::Delete(from: $t);
+    $q->where($id == 7);
+    carbon::Written $w = guard $db->connection()->exec($q);
+    assert($w->affected == 2);
+    assert($fake->pending() == 1);
+    result<carbon::Written, Error> $second = $db->connection()->exec($q);
+    assert($second->failed());
+    assert($fake->count() == 2);
+    assert($fake->last() == 'DELETE FROM `things` WHERE `things`.`id` = ?');
+    assert($fake->sent(0, [Value::from(7)]));
+    assert($fake->pending() == 0);
+}
+
+test fake_reads_like_a_driver
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->rows([[Value::from(1), Value::from(true), Value::none], [Value::from(0), Value::from('x'), Value::from(2.5)]]);
+    Db $db = Db($fake);
+    hydrahon::Table $t = hydrahon::Table(name: 'things');
+    carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: $t));
+    bool $first = guard $c->step();
+    assert($first);
+    assert($c->bool(0) ?? false);
+    assert(($c->int(1) ?? 0) == 1);
+    assert($c->isNull(2));
+    assert($c->isNull(9));
+    bool $second = guard $c->step();
+    assert($second);
+    assert(!($c->bool(0) ?? true));
+    assert($c->int(1) == null);
+    assert(!$c->isNull(1));
+    assert(($c->float(2) ?? 0.0) == 2.5);
+    bool $third = guard $c->step();
+    assert(!$third);
+}
+
+test transaction_commits
+{
+    $fake = fake::Driver<Mysql>();
+    Db $db = Db($fake);
+    guard $db->transaction(function[$db]() : status<Error> {
+        assert($db->inTransaction());
+        return .ok();
+    });
+    assert(!$db->inTransaction());
+    assert(str::join($fake->texts(), ' | ') == 'BEGIN | COMMIT');
+}
+
+test transaction_rolls_back_and_keeps_the_error
+{
+    $fake = fake::Driver<Mysql>();
+    Db $db = Db($fake);
+    status<Error> $s = $db->transaction(function() : status<Error> {
+        return .error(.refused('no'));
+    });
+    assert($s->failed());
+    assert(str::from($s->failure()) == 'refused: no');
+    assert(str::join($fake->texts(), ' | ') == 'BEGIN | ROLLBACK');
+    assert(!$db->inTransaction());
+}
+
+test transaction_does_not_nest
+{
+    $fake = fake::Driver<Mysql>();
+    Db $db = Db($fake);
+    status<Error> $s = $db->transaction(function[$db]() : status<Error> {
+        return $db->transaction(function() : status<Error> { return .ok(); });
+    });
+    assert($s->failed());
+    assert(str::from($s->failure()) == 'a transaction is already open');
+    assert(str::join($fake->texts(), ' | ') == 'BEGIN | ROLLBACK');
+}
+
+test log_hears_every_statement
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->written(1)->written(0);
+    Db $db = Db($fake);
+    Log $log = Log();
+    $db->listen($log);
+    hydrahon::Table $t = hydrahon::Table(name: 'things');
+    guard $db->connection()->exec(hydrahon::Delete(from: $t));
+    guard $db->transaction(function() : status<Error> { return .ok(); });
+    guard $db->run('TRUNCATE things');
+    assert($log->count() == 4);
+    assert(str::join($log->texts(), ' | ') == 'DELETE FROM `things` | BEGIN | COMMIT | TRUNCATE things');
+    assert(!$log->entries[0]->failed);
+}
+
+test a_transaction_hands_back_what_it_made
+{
+    $fake = fake::Driver<Mysql>();
+    Db $db = Db($fake);
+    result<int64, Error> $made = $db->transaction(function() : result<int64, Error> {
+        return .ok(42);
+    });
+    int64 $n = guard $made;
+    assert($n == 42);
+    assert(str::join($fake->texts(), ' | ') == 'BEGIN | COMMIT');
+    result<int64, Error> $lost = $db->transaction(function() : result<int64, Error> {
+        return .error(.refused('no'));
+    });
+    assert($lost->failed() && str::from($lost->failure()) == 'refused: no');
+    assert(str::join($fake->texts(), ' | ') == 'BEGIN | COMMIT | BEGIN | ROLLBACK');
+    assert(!$db->inTransaction());
+}
+
+test fixed_clock_moves_when_told
+{
+    carbon::clock::Fixed $clock = carbon::clock::Fixed(unix: 0);
+    DateTime $a = $clock->now();
+    assert($a->year == 1970 && $a->month == 1 && $a->day == 1);
+    $clock->advance(86400 + 3661);
+    DateTime $b = $clock->now();
+    assert($b->day == 2 && $b->hour == 1 && $b->minute == 1 && $b->second == 1);
+}

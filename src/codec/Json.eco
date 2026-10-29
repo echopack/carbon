@@ -1,0 +1,26 @@
+namespace carbon::codec;
+
+/**
+ * Any JSON document as a `json::Value`, stored as its compact text. A JSON `null` is
+ * `json::nil()`; SQL NULL is a nullable field's `null` and never gets here.
+ *
+ * ```echo
+ * #[carbon::codec: 'json']
+ * public json::Value $meta = json::object();
+ * ```
+ *
+ * Arrays and objects in a `json::Value` share their contents, so `$post->meta['views'] = 3`
+ * changes the model in place, and the next save writes the column.
+ */
+public struct Json : carbon::Codec<json::Value, string>
+{
+    public const function decode(string $raw) : result<json::Value, carbon::Problem>
+    {
+        return Doc::parse($raw);
+    }
+
+    public const function encode(const json::Value& $value) : string
+    {
+        return json::dump($value);
+    }
+}

@@ -1,0 +1,8 @@
+namespace fixtures;
+
+public enum Mood : uint8
+{
+    case calm = 0;
+    case happy = 1;
+    case grumpy = 2;
+}

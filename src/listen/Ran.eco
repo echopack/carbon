@@ -1,0 +1,13 @@
+namespace carbon::listen;
+
+use std::time;
+
+/**
+ * One statement the database ran, as a `Listener` sees it.
+ */
+public struct Ran
+{
+    public Statement $statement;
+    public time::duration $took;
+    public bool $failed;
+}

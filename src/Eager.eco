@@ -1,0 +1,14 @@
+namespace carbon;
+
+/**
+ * A relation that can be loaded for a batch of models `M` at once: what `Query::with` takes.
+ * carbongen writes one per relation slot, and the `with…()` methods of the generated
+ * `PostRelations` build them: `->withAuthor()`.
+ */
+public interface Eager<M>
+{
+    /**
+     * Fill the relation's slot of every model in `$models`, with one query on `$db`.
+     */
+    function load(array<M>& $models, Connection $db) : status<Error>;
+}

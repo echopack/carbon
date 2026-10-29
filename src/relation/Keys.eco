@@ -1,0 +1,35 @@
+namespace carbon::relation;
+
+/**
+ * The distinct keys of a batch, in first seen order: what a loader puts in its `IN` list.
+ */
+public struct Keys<K>
+{
+    internal array<K> $list;
+    internal map<K, bool> $seen;
+
+    public constructor()
+    {
+        $this->list = [];
+        $this->seen = [];
+    }
+
+    public function add(K $key) : void
+    {
+        if ($this->seen->has($key)) {
+            return;
+        }
+        $this->seen[$key] = true;
+        $this->list[] = $key;
+    }
+
+    public const function list() : const array<K>&
+    {
+        return $this->list;
+    }
+
+    public const function empty() : bool
+    {
+        return $this->list->count() == 0;
+    }
+}

@@ -1,0 +1,76 @@
+namespace carbon::change;
+
+/**
+ * Which columns a write touches, by position in `Schema::fields()`.
+ */
+public struct Changes
+{
+    internal array<bool> $marks = [];
+
+    /**
+     * Every one of `$count` columns.
+     */
+    public constructor(all: usize $count)
+    {
+        $this->fill($count, true);
+    }
+
+    /**
+     * None of `$count` columns.
+     */
+    public constructor(none: usize $count)
+    {
+        $this->fill($count, false);
+    }
+
+    public const function has(usize $at) : bool
+    {
+        if ($at >= $this->marks->count()) {
+            return false;
+        }
+        return $this->marks[$at];
+    }
+
+    public function mark(usize $at) : void
+    {
+        if ($at < $this->marks->count()) {
+            $this->marks[$at] = true;
+        }
+    }
+
+    public function clear(usize $at) : void
+    {
+        if ($at < $this->marks->count()) {
+            $this->marks[$at] = false;
+        }
+    }
+
+    /**
+     * How many columns are marked.
+     */
+    public const function count() : usize
+    {
+        usize $n = 0;
+        foreach ($this->marks as $m) {
+            if ($m) {
+                $n = $n + 1;
+            }
+        }
+        return $n;
+    }
+
+    public const function empty() : bool
+    {
+        return $this->count() == 0;
+    }
+
+    internal function fill(usize $count, bool $marked) : void
+    {
+        $this->marks->reserve($count);
+        usize $i = 0;
+        while ($i < $count) {
+            $this->marks[] = $marked;
+            $i = $i + 1;
+        }
+    }
+}

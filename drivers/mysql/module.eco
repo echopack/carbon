@@ -1,0 +1,29 @@
+/*
+ * carbon-mysql: carbon's driver for MySQL and MariaDB, on libmysql.
+ *
+ * Renders hydrahon statements in the MySQL dialect, binds their parameters,
+ * streams rows through libmysql's position based RowView, and maps
+ * libmysql's errors onto carbon's. Inserted keys come back through the last
+ * insert id, since MySQL has no RETURNING.
+ */
+
+#[module: "carbon-mysql"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "the mysql driver for carbon, on libmysql"]
+
+#[depends: "../.."]
+#[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echolang/libmysql" { version: "^0.1", source: git "https://github.com/echolang/libmysql" }]
+
+#[sources: "src/*.eco"]
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+
+    // scripts/test-live.sh: the blog example against a real server
+    #[if: live]
+    #[depends: "../../examples/blog"]
+    #[sources: "tests/live/*.eco"]
+    #[end]
+}

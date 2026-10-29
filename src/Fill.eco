@@ -1,0 +1,35 @@
+namespace carbon;
+
+/**
+ * The relations to fill on models `M` already in hand, and the connection they load on: what
+ * the generated `PostLoad` keeps behind its `with…()` methods and `into()`.
+ */
+public struct Fill<M>
+{
+    internal Connection $db;
+    internal array<Eager<M>> $eager = [];
+
+    public constructor(Connection $db)
+    {
+        $this->db = $db;
+    }
+
+    /**
+     * Fill `$relation` too.
+     */
+    public function add(Eager<M> $relation) : void
+    {
+        $this->eager[] = mv $relation;
+    }
+
+    /**
+     * Fill every relation on `$models`, one query each, in the order they were added.
+     */
+    public function into(array<M>& $models) : status<Error>
+    {
+        foreach ($this->eager as &$relation) {
+            guard $relation->load($models, $this->db) else ($e) { return .error($e); }
+        }
+        return .ok();
+    }
+}

@@ -1,0 +1,58 @@
+namespace fixtures;
+
+use hydrahon::Value;
+
+/**
+ * The error's message, or empty when `$s` succeeded.
+ */
+public function message(status<carbon::Error>& $s) : string
+{
+    if (!$s->failed()) {
+        return '';
+    }
+    return str::from($s->failure());
+}
+
+/**
+ * A driver failure with fault `$fault`.
+ */
+public function failure(carbon::Fault $fault) : carbon::Error
+{
+    return .driver(carbon::Failure($fault, 'refused by the fake', '23000', 1062));
+}
+
+/**
+ * The SELECT carbon writes for tags, followed by `$tail`.
+ */
+public function selectTags(const string& $tail) : string
+{
+    string $out = 'SELECT `tags`.`id`, `tags`.`note_id`, `tags`.`name` FROM `tags`';
+    $out->append($tail);
+    return $out;
+}
+
+/**
+ * A tags row in field order.
+ */
+public function tagRow(int64 $id, int64 $note, const string& $name) : array<Value>
+{
+    return TagTable()->row(Tag($id: $id, $noteId: $note, $name: $name));
+}
+
+/**
+ * A notes row in field order, with no body and no timestamps.
+ */
+public function noteRow(int64 $id, const string& $title, bool $pinned = false, Mood $mood = .calm) : array<Value>
+{
+    return NoteTable()->row(Note($id: $id, $title: $title, $pinned: $pinned, $mood: $mood));
+}
+
+/**
+ * The SELECT carbon writes for notes, followed by `$tail`.
+ */
+public function selectNotes(const string& $tail) : string
+{
+    string $out = 'SELECT `notes`.`id`, `notes`.`title`, `notes`.`pinned`, `notes`.`mood`, `notes`.`body`, `notes`.`created_at`, `notes`.`updated_at`, `notes`.`deleted_at` FROM `notes`';
+    $out->append($tail);
+    return $out;
+}

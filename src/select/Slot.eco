@@ -1,0 +1,29 @@
+namespace carbon::select;
+
+/**
+ * A computed field of a model: a value a query can select alongside the columns (a joined
+ * table's column, a count) that lands on the model but is never written back. carbongen emits
+ * one per `#[carbon::computed]` field, `MovieTable::$textTitle`, named the way the column would
+ * be.
+ *
+ * ```echo
+ * $t = MovieTextTable::alias('movie_text');
+ * $q = $q->join(inner: $t, on: $t->movieId == MovieTable::$id)->select(MovieTable::$textTitle->from($t->title));
+ * ```
+ */
+public struct Slot<T>
+{
+    /**
+     * The name the value is selected under, `text_title`.
+     */
+    public string $alias;
+
+    /**
+     * The slot filled from `$term`. The term's type has to be the slot's, so a computed
+     * `string?` field takes a `Term<string>`.
+     */
+    public const function from(hydrahon::Term<T> $term) : Pick
+    {
+        return Pick($this->alias, $term->named($this->alias));
+    }
+}

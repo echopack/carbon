@@ -1,0 +1,266 @@
+namespace carbon;
+
+use std::time;
+use carbon::listen::Ran;
+
+/**
+ * What repositories and queries run on: the driver, the clock timestamps come from, the
+ * listeners that hear about every statement and the stores of every model. A `Db` owns one and
+ * hands it to the repositories it registers, `PostRepository($db->connection())`. Nothing in
+ * carbon is global; whatever a store needs, it reaches through its `Connection`.
+ */
+public class Connection
+{
+    public Driver $driver;
+    public Clock $clock;
+    internal array<Listener> $listeners = [];
+    internal bool $open = false;
+    internal map<type_id, erased> $stores = [];
+    internal map<string, string> $schemas = [];
+
+    public constructor(Driver $driver)
+    {
+        $this->driver = $driver;
+        $this->clock = carbon::clock::System();
+    }
+
+    public constructor(Driver $driver, clock: Clock $clock)
+    {
+        $this->driver = $driver;
+        $this->clock = $clock;
+    }
+
+    /**
+     * Name the databases (schemas) the app reaches besides the connection's own, so a query can
+     * join a table there without knowing where it is deployed:
+     * `$db->schema('cache', 'movies_cache_prod')`, then
+     * `MovieCountsTable::alias('c', schema: $q->connection()->schema('cache'))`.
+     */
+    public function schema(const string& $name, const string& $actual) : void
+    {
+        $this->schemas[$name] = $actual;
+    }
+
+    /**
+     * The database named `$name`, null when none was given.
+     */
+    public const function schema(const string& $name) : string?
+    {
+        if (!$this->schemas->has($name)) {
+            return null;
+        }
+        string $actual = $this->schemas->get($name);
+        return $actual;
+    }
+
+    /**
+     * Tell `$listener` about every statement from now on.
+     */
+    public function listen(Listener $listener) : void
+    {
+        $this->listeners[] = $listener;
+    }
+
+    /**
+     * The one store of model `M` on this connection, made the first time it is asked for. The
+     * connection owns its stores; a store holds no reference back.
+     */
+    public function store<M, K, S, R>() : Store<M, K, S, R>
+    {
+        type_id $id = type_id<Store<M, K, S, R>>();
+        if (!$this->stores->has($id)) {
+            $this->stores[$id] = erased::from(Held<Store<M, K, S, R>>(Store<M, K, S, R>()));
+        }
+        erased $held = $this->stores->get($id);
+        Held<Store<M, K, S, R>> $entry;
+        // sound: only this method writes the key, always with this type
+        unsafe {
+            $entry = assume<Held<Store<M, K, S, R>>>($held);
+        }
+        return $entry->value;
+    }
+
+    /**
+     * Run a SELECT.
+     */
+    public function query(const hydrahon::Select& $q) : result<Cursor, Error>
+    {
+        return $this->fetch($this->driver->render($q));
+    }
+
+    /**
+     * Run an INSERT with RETURNING.
+     */
+    public function query(const hydrahon::Insert& $q) : result<Cursor, Error>
+    {
+        return $this->fetch($this->driver->render($q));
+    }
+
+    public function exec(const hydrahon::Insert& $q) : result<Written, Error>
+    {
+        return $this->write($this->driver->render($q));
+    }
+
+    public function exec(const hydrahon::Update& $q) : result<Written, Error>
+    {
+        return $this->write($this->driver->render($q));
+    }
+
+    public function exec(const hydrahon::Delete& $q) : result<Written, Error>
+    {
+        return $this->write($this->driver->render($q));
+    }
+
+    /**
+     * Run `$work` in a transaction: commit when it succeeds, roll back when it fails and hand
+     * back its error. Transactions do not nest.
+     */
+    public function transaction(function<status<Error>()> $work) : status<Error>
+    {
+        guard $this->begin() else ($e) { return .error($e); }
+        status<Error> $done = $work();
+        if ($done->failed()) {
+            // the work's error is the one worth reporting, not a failed rollback
+            $this->close(false);
+            return $done;
+        }
+        return $this->close(true);
+    }
+
+    /**
+     * Run `$work` in a transaction and hand back what it made: committed when it succeeds,
+     * rolled back when it fails.
+     *
+     * ```echo
+     * User $carol = guard $db->transaction(function[$users, $posts]() : result<User, carbon::Error> {
+     *     User $u = guard $users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
+     *     guard $posts->create(Post($authorId: $u->id, $title: 'Hello')) else ($e) { return .error($e); }
+     *     return .ok($u);
+     * });
+     * ```
+     */
+    public function transaction<T>(function<result<T, Error>()> $work) : result<T, Error>
+    {
+        return $this->produce<T>($work);
+    }
+
+    /**
+     * `transaction<T>` under a name of its own, so a generic caller reaches it: from a generic
+     * body, a call to `transaction` resolves to the overload that is not generic.
+     */
+    internal function produce<T>(function<result<T, Error>()> $work) : result<T, Error>
+    {
+        guard $this->begin() else ($e) { return .error($e); }
+        result<T, Error> $done = $work();
+        if ($done->failed()) {
+            $this->close(false);
+            return $done;
+        }
+        guard $this->close(true) else ($e) { return .error($e); }
+        return $done;
+    }
+
+    /**
+     * Run `$sql` as it is, without parameters: DDL, migrations, anything carbon does not build.
+     * Listeners hear it like every other statement.
+     */
+    public function run(const string& $sql) : result<Written, Error>
+    {
+        return $this->write(Statement(plain: $sql));
+    }
+
+    /**
+     * Whether a transaction is open.
+     */
+    public const function inTransaction() : bool
+    {
+        return $this->open;
+    }
+
+    internal function begin() : status<Error>
+    {
+        if ($this->open) {
+            return .error(.nested);
+        }
+        guard $this->control(.begin) else ($e) { return .error($e); }
+        $this->open = true;
+        return .ok();
+    }
+
+    /**
+     * Close the open transaction, committing it or rolling it back.
+     */
+    internal function close(bool $commit) : status<Error>
+    {
+        $this->open = false;
+        if ($commit) {
+            return $this->control(.commit);
+        }
+        return $this->control(.rollback);
+    }
+
+    internal function fetch(result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Cursor, Error>
+    {
+        hydrahon::Sql $sql = guard $rendered else ($e) { return .error(.render($e)); }
+        return $this->fetch(Statement($sql));
+    }
+
+    internal function write(result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Written, Error>
+    {
+        hydrahon::Sql $sql = guard $rendered else ($e) { return .error(.render($e)); }
+        return $this->write(Statement($sql));
+    }
+
+    internal function fetch(const Statement& $s) : result<Cursor, Error>
+    {
+        time::instant $start = time::instant::now();
+        result<Cursor, Error> $r = $this->driver->query($s);
+        $this->tell($s, $start, $r->failed());
+        return $r;
+    }
+
+    internal function write(const Statement& $s) : result<Written, Error>
+    {
+        time::instant $start = time::instant::now();
+        result<Written, Error> $r = $this->driver->exec($s);
+        $this->tell($s, $start, $r->failed());
+        return $r;
+    }
+
+    internal function control(Control $step) : status<Error>
+    {
+        time::instant $start = time::instant::now();
+        status<Error> $r = match ($step) {
+            Control::begin => $this->driver->begin(),
+            Control::commit => $this->driver->commit(),
+            Control::rollback => $this->driver->rollback(),
+        };
+        $this->tell($step->statement(), $start, $r->failed());
+        return $r;
+    }
+
+    internal function tell(const Statement& $s, time::instant $start, bool $failed) : void
+    {
+        if ($this->listeners->count() == 0) {
+            return;
+        }
+        Ran $event = Ran($s, $start->elapsed(), $failed);
+        foreach ($this->listeners as &$l) {
+            $l->ran($event);
+        }
+    }
+}
+
+/**
+ * A store as the connection keeps it, or a repository as the `Db` keeps it, behind an erased
+ * handle keyed by its type.
+ */
+internal class Held<T : class>
+{
+    internal T $value;
+
+    internal constructor(T $value)
+    {
+        $this->value = $value;
+    }
+}

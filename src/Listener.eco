@@ -1,0 +1,12 @@
+namespace carbon;
+
+use carbon::listen::Ran;
+
+/**
+ * Told about every statement a `Connection` runs: for logging, metrics, or counting queries in a
+ * test.
+ */
+public interface Listener
+{
+    function ran(const Ran& $event) : void;
+}

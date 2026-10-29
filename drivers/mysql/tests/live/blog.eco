@@ -1,0 +1,231 @@
+use blog::{Tables, UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostQuery, CommentQuery};
+use carbon::{Db, Error};
+use carbon::mysql::Driver;
+use carbon::listen::Log;
+use carbon::clock;
+use std::env;
+
+/**
+ * A blog on the server in CARBON_MYSQL_URL, with fresh tables, a log and a clock that only
+ * moves when told.
+ */
+class Live
+{
+    public Db $db;
+    public UserRepository $users;
+    public PostRepository $posts;
+    public CommentRepository $comments;
+    public Log $log;
+    public clock::Fixed $clock;
+
+    public constructor()
+    {
+        string $url = string::from(env::var('CARBON_MYSQL_URL') ?? '');
+        assert(!$url->empty());
+        Driver $driver = guard Driver::open($url) else ($e) { die("connect: {$e}"); }
+        $this->log = Log();
+        $this->clock = clock::Fixed(unix: 1700000000);
+        $this->db = Db($driver, clock: $this->clock);
+        foreach (Tables::recreate() as const &$sql) {
+            guard $this->db->run($sql) else ($e) { die("{$sql}: {$e}"); }
+        }
+        $this->db->listen($this->log);
+        $this->db->register(UserRepository($this->db->connection()));
+        $this->db->register(PostRepository($this->db->connection()));
+        $this->db->register(CommentRepository($this->db->connection()));
+        $this->users = $this->db->repo<UserRepository>();
+        $this->posts = $this->db->repo<PostRepository>();
+        $this->comments = $this->db->repo<CommentRepository>();
+    }
+
+    /**
+     * Statements run since the last call.
+     */
+    public function ran() : usize
+    {
+        usize $n = $this->log->count();
+        $this->log->clear();
+        return $n;
+    }
+}
+
+test live_blog_tour
+{
+    $live = Live();
+    $b = $live;
+
+    // create
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario', $admin: true));
+    User $boris = guard $b->users->create(User($email: 'boris@example.com', $name: 'Boris'));
+    assert($mario->id == 1 && $boris->id == 2);
+    array<Post> $mine = [];
+    array<string> $titles = ['Typed SQL', 'Weak links', 'Draft ideas'];
+    foreach ($titles as const &$t) {
+        $live->clock->advance(60);
+        Post $p = guard $b->posts->create(Post($authorId: $mario->id, $title: $t, $tags: ['echo', 'carbon']));
+        $mine[] = $p;
+    }
+    $live->clock->advance(60);
+    Post $theirs = guard $b->posts->create(Post($authorId: $boris->id, $title: 'Hello from Boris', $body: 'hi', $views: 70000));
+    guard $b->posts->publish($mine[0]);
+    guard $b->posts->publish($mine[1]);
+    guard $b->posts->publish($theirs);
+
+    // read back: enums, codecs, narrow ints, nullable text and datetimes survive the trip
+    Post $back = guard $b->posts->find()->one($theirs->id);
+    assert($back->status == Status::published);
+    assert($back->views == 70000);
+    assert(($back->body ?? '') == 'hi');
+    assert($back->tags->count() == 0);
+    Post $tagged = guard $b->posts->find()->one($mine[0]->id);
+    assert($tagged->tags->count() == 2 && $tagged->tags[1] == 'carbon');
+    hydrahon::DateTime $made = guard $tagged->createdAt;
+    assert($made->year == 2023 && $made->month == 11 && $made->day == 14 && $made->hour == 22 && $made->minute == 14);
+    User $admin = guard $b->users->find()->one($mario->id);
+    assert($admin->admin);
+
+    // a clean save runs nothing, a dirty one writes and reads back
+    $live->ran();
+    guard $tagged->save();
+    assert($live->ran() == 0);
+    $tagged->title = 'Typed SQL, typed models';
+    guard $tagged->save();
+    assert($live->ran() == 1);
+    Post $again = guard $tagged->fresh();
+    assert($again->title == 'Typed SQL, typed models');
+
+    // a JSON column: the server keeps the document in its own spelling, the model reads it back
+    $live->ran();
+    $tagged->meta['lang'] = 'de';
+    $tagged->meta['tags'] = json::arr();
+    $tagged->meta['tags'][] = 'echo';
+    guard $tagged->save();
+    assert($live->ran() == 1);
+    Post $meta = guard $tagged->fresh();
+    assert(($meta->meta['lang']->asStr() ?? '') == 'de');
+    assert(($meta->meta['tags'][0]->asStr() ?? '') == 'echo');
+    assert(!$meta->dirty());
+    assert($back->meta->count() == 0);
+
+    // custom finders
+    array<Post> $active = guard $b->posts->active();
+    assert($active->count() == 3);
+    assert($active[0]->title == 'Hello from Boris');
+    array<Post> $feed = guard $b->posts->feed($mario, 0);
+    assert($feed->count() == 2);
+    array<Post> $found = guard $b->posts->search('Weak');
+    assert($found->count() == 1 && $found[0]->id == $mine[1]->id);
+
+    // eager loading: one query per relation
+    Comment $c1 = guard $b->comments->leave($mine[0], 'first!');
+    guard $b->comments->leave($mine[0], 'second');
+    guard $b->comments->leave($theirs, 'nice');
+    $live->ran();
+    guard $b->posts->load()->withAuthor()->withComments()->into($active);
+    assert($live->ran() == 2);
+    User $author = guard $active[0]->author->get();
+    assert($author->name == 'Boris');
+    usize $comments = 0;
+    foreach ($active as const &$p) {
+        $comments = $comments + $p->comments->count();
+    }
+    assert($comments == 3);
+    array<User> $people = guard $b->users->find()->withPosts(function(PostQuery $q) : PostQuery {
+        return $q->withComments(function(CommentQuery $c) : CommentQuery {
+            return $c->withPost();
+        });
+    })->get();
+    assert($live->ran() == 4);
+    assert($people[0]->posts->count() == 3 && $people[1]->posts->count() == 1);
+    usize $nested = 0;
+    foreach ($people as const &$u) {
+        foreach ($u->posts->get() as const &$p) {
+            foreach ($p->comments->get() as const &$c) {
+                Post $owner = guard $c->post->get();
+                assert($owner->id == $p->id);
+                $nested = $nested + 1;
+            }
+        }
+    }
+    assert($nested == 3);
+
+    // soft delete, the trashed scopes and restore
+    guard $mine[1]->delete();
+    array<Post> $left = guard $b->posts->active();
+    assert($left->count() == 2);
+    uint64 $trashed = guard $b->posts->find()->scope(.trashed)->count();
+    assert($trashed == 1);
+    guard $b->posts->restore($mine[1]);
+    uint64 $all = guard $b->posts->count();
+    assert($all == 4);
+
+    // exists reads one row and leaves the connection usable
+    bool $any = guard $b->posts->find()->popular(1000)->exists();
+    assert($any);
+    uint64 $popular = guard $b->posts->find()->popular(1000)->count();
+    assert($popular == 1);
+
+    // a duplicate inside a transaction rolls the whole thing back
+    status<Error> $s = $b->db->transaction(function[$b]() : status<Error> {
+        guard $b->users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
+        guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failed());
+    assert($s->failure()->duplicate());
+    uint64 $users = guard $b->users->count();
+    assert($users == 2);
+
+    // a dangling foreign key is a reference fault
+    result<Comment, Error> $orphan = $b->comments->create(Comment($postId: 999, $body: 'lost'));
+    assert($orphan->failed());
+    assert($orphan->failure()->fault() == carbon::Fault::reference);
+
+    // bulk writes
+    uint64 $archived = guard $b->posts->archive($boris);
+    assert($archived == 1);
+    guard $b->comments->purge($c1);
+    uint64 $left2 = guard $b->comments->count();
+    assert($left2 == 2);
+
+    // streaming
+    Seen $seen = Seen();
+    guard $b->posts->find()->each(function[$seen](Post $p) : status<Error> {
+        $seen->views = $seen->views + ($p->views as int64);
+        return .ok();
+    });
+    assert($seen->views == 70000);
+}
+
+class Seen
+{
+    public int64 $views = 0;
+}
+
+test live_writes_inside_each
+{
+    $live = Live();
+    $b = $live;
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario'));
+    guard $b->posts->create(Post($authorId: $mario->id, $title: 'One'));
+    guard $b->posts->create(Post($authorId: $mario->id, $title: 'Two'));
+    // the rows are still streaming while the visitor runs, so the connection takes no write
+    status<Error> $s = $b->posts->find()->each(function(Post $p) : status<Error> {
+        $p->title = "{$p->title}!";
+        return $p->save();
+    });
+    assert(str::from($s->failure()) == 'database error: a streaming result is still open on this connection');
+    // a batch is read in full before the visitor runs: it writes freely
+    guard $b->posts->find()->each(batch: 10, function(array<Post> $batch) : status<Error> {
+        foreach ($batch as &$p) {
+            $p->title = "{$p->title}!";
+            guard $p->save() else ($e) { return .error($e); }
+        }
+        return .ok();
+    });
+    array<Post> $all = guard $b->posts->find()->order(asc: blog::PostTable::$id)->get();
+    assert($all[0]->title == 'One!' && $all[1]->title == 'Two!');
+    // and the connection is free again after a stream that stopped early
+    uint64 $n = guard $b->posts->count();
+    assert($n == 2);
+}

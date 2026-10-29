@@ -1,0 +1,20 @@
+namespace carbon;
+
+/**
+ * The write a store is about to make, or just made.
+ */
+public enum Event : uint8
+{
+    case creating = 0;
+    case updating = 1;
+    case deleting = 2;
+    case restoring = 3;
+
+    /**
+     * Whether the write saves the model: an insert or an update.
+     */
+    public const function saves() : bool
+    {
+        return $this == Event::creating || $this == Event::updating;
+    }
+}

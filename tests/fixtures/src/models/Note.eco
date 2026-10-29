@@ -1,0 +1,42 @@
+/*
+ * Note (timestamps, soft delete, an enum, a nullable column, a query with scopes and a
+ * repository with hooks) and Tag (plain, belongs to a note, query and repository written by
+ * carbongen), mapped by carbongen.
+ */
+
+namespace fixtures;
+
+use hydrahon::DateTime;
+
+#[carbon::model: 'notes']
+public class Note : carbon::Model<Note, NoteRepository>
+{
+    public carbon::Link<NoteRepository> $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+    public string $title;
+    public bool $pinned = false;
+    public Mood $mood = .calm;
+    public string? $body = null;
+
+    #[carbon::created]
+    public DateTime? $createdAt = null;
+
+    #[carbon::updated]
+    public DateTime? $updatedAt = null;
+
+    #[carbon::deleted]
+    public DateTime? $deletedAt = null;
+
+    #[carbon::computed]
+    public int64? $tagCount = null;
+
+    #[carbon::hasMany: 'noteId']
+    public carbon::Many<Tag> $tags = .unloaded();
+
+    public function link() : carbon::Link<NoteRepository>&
+    {
+        return $this->link;
+    }
+}

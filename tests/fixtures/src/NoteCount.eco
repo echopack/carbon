@@ -1,0 +1,11 @@
+namespace fixtures;
+
+/**
+ * The tags each note has, as the cache table an app would join for a count: no model.
+ */
+#[carbon::table: 'note_counts']
+public struct NoteCount
+{
+    public int64 $noteId;
+    public int64 $tags;
+}

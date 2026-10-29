@@ -1,0 +1,6 @@
+namespace carbongen;
+
+/**
+ * The property of a generated table that holds its `hydrahon::Table`.
+ */
+const string RESERVED = 'carbonTable';

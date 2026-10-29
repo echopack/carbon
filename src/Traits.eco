@@ -1,0 +1,13 @@
+namespace carbon;
+
+/**
+ * What a driver can do that changes how carbon talks to it.
+ */
+public struct Traits
+{
+    /**
+     * Keys of inserted rows come back through RETURNING (Postgres, SQLite) instead of the last
+     * insert id (MySQL).
+     */
+    public bool $returning = false;
+}

@@ -1,0 +1,240 @@
+namespace carbon::fake;
+
+use hydrahon::Value;
+use carbon::change::Snapshot;
+
+/**
+ * A driver for tests: it renders every statement with a real hydrahon dialect, keeps it, and
+ * answers from a queue the test fills in order. A statement with no answer waiting stops the
+ * program and names the SQL, so a test fails at the query it did not expect instead of
+ * carrying on with nothing.
+ *
+ * ```echo
+ * $fake = carbon::fake::Driver<hydrahon::Mysql>();
+ * $fake->rows([[1, 'Hello']])->written(insertId: 7);
+ * $db = carbon::Db($fake);
+ * ```
+ *
+ * `Driver<hydrahon::Mysql>` reads inserted keys from the last insert id,
+ * `Driver<hydrahon::Postgres>` from RETURNING, so both paths can be tested.
+ */
+public class Driver<D : hydrahon::Dialect> : carbon::Driver
+{
+    internal D $dialect;
+    internal array<Answer> $answers = [];
+    internal usize $next = 0;
+
+    /**
+     * Every statement in the order it ran, transaction control (`BEGIN`, `COMMIT`,
+     * `ROLLBACK`) included.
+     */
+    public array<Statement> $statements = [];
+
+    public constructor()
+    {
+        $this->dialect = D();
+    }
+
+    public constructor(D $dialect)
+    {
+        $this->dialect = $dialect;
+    }
+
+    /**
+     * Answer the next query with `$rows`, one array of column values per row in
+     * `Schema::fields()` order.
+     */
+    public function rows(array<array<Value>> $rows) : Driver<D>
+    {
+        $this->answers[] = Answer::rows(mv $rows);
+        return $this;
+    }
+
+    /**
+     * Answer the next statement that returns no rows.
+     */
+    public function written(uint64 $affected = 1, uint64 $insertId = 0) : Driver<D>
+    {
+        $this->answers[] = Answer::written(Written($affected, $insertId));
+        return $this;
+    }
+
+    /**
+     * Fail the next statement with `$error`.
+     */
+    public function fails(Error $error) : Driver<D>
+    {
+        $this->answers[] = Answer::fails($error);
+        return $this;
+    }
+
+    /**
+     * How many statements ran, transaction control included.
+     */
+    public const function count() : usize
+    {
+        return $this->statements->count();
+    }
+
+    /**
+     * The SQL text of every statement, in order.
+     */
+    public const function texts() : array<string>
+    {
+        array<string> $out = [];
+        foreach ($this->statements as const &$s) {
+            $out[] = $s->text;
+        }
+        return $out;
+    }
+
+    /**
+     * The SQL text of the last statement, empty when none ran.
+     */
+    public const function last() : string
+    {
+        usize $n = $this->statements->count();
+        if ($n == 0) {
+            return '';
+        }
+        return $this->statements[$n - 1]->text;
+    }
+
+    /**
+     * The parameters of statement `$at`.
+     */
+    public const function params(usize $at) : array<Value>
+    {
+        array<Value> $out = [];
+        foreach ($this->statements[$at]->params as const &$v) {
+            $out[] = $v;
+        }
+        return $out;
+    }
+
+    /**
+     * Whether statement `$at` was bound with exactly `$expected`: the same values of the same
+     * kinds, in order.
+     */
+    public const function sent(usize $at, const array<Value>& $expected) : bool
+    {
+        array<Value> $got = $this->params($at);
+        if ($got->count() != $expected->count()) {
+            return false;
+        }
+        foreach ($got as $i => const &$v) {
+            if (!Snapshot::same($v, $expected[$i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * How many queued answers no statement has taken yet.
+     */
+    public const function pending() : usize
+    {
+        return $this->answers->count() - $this->next;
+    }
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public function query(const Statement& $s) : result<carbon::Cursor, Error>
+    {
+        $this->statements[] = $s;
+        Answer $a = $this->take($s);
+        match ($a) {
+            Answer::rows($rows) => {
+                carbon::Cursor $c = Cursor($rows);
+                return .ok($c);
+            },
+            Answer::fails($e) => {
+                return .error($e);
+            },
+            Answer::written($w) => {
+                die("carbon fake: rows expected, a write answer is queued for {$s->text}");
+            },
+        };
+        return .error(.missing);
+    }
+
+    public function exec(const Statement& $s) : result<Written, Error>
+    {
+        $this->statements[] = $s;
+        Answer $a = $this->take($s);
+        match ($a) {
+            Answer::written($w) => {
+                return .ok($w);
+            },
+            Answer::fails($e) => {
+                return .error($e);
+            },
+            Answer::rows($rows) => {
+                die("carbon fake: a write answer expected, rows are queued for {$s->text}");
+            },
+        };
+        return .error(.missing);
+    }
+
+    public const function traits() : Traits
+    {
+        return Traits($this->dialect->supports(hydrahon::Feature::returning));
+    }
+
+    public function begin() : status<Error>
+    {
+        $this->statements[] = Control::begin->statement();
+        return .ok();
+    }
+
+    public function commit() : status<Error>
+    {
+        $this->statements[] = Control::commit->statement();
+        return .ok();
+    }
+
+    public function rollback() : status<Error>
+    {
+        $this->statements[] = Control::rollback->statement();
+        return .ok();
+    }
+
+    internal function take(const Statement& $s) : Answer
+    {
+        if ($this->next >= $this->answers->count()) {
+            die("carbon fake: no answer queued for {$s->text}");
+        }
+        Answer $a = $this->answers[$this->next];
+        $this->next = $this->next + 1;
+        return $a;
+    }
+}
+
+/**
+ * One queued answer of a `Driver`.
+ */
+internal enum Answer
+{
+    case rows(array<array<Value>> $rows);
+    case written(Written $written);
+    case fails(Error $error);
+}

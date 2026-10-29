@@ -1,0 +1,150 @@
+namespace carbon::mysql;
+
+/**
+ * carbon on MySQL or MariaDB, over one libmysql connection.
+ *
+ * ```echo
+ * carbon::mysql::Driver $driver = guard carbon::mysql::Driver::open('mysql://root@127.0.0.1/blog');
+ * carbon::Db $db = carbon::Db($driver);
+ * $db->register(PostRepository($db->connection()));
+ * ```
+ */
+public class Driver : carbon::Driver
+{
+    public mysql::Connection $connection;
+    internal hydrahon::Mysql $dialect;
+    internal mysql::Transaction? $open = null;
+
+    public constructor(mysql::Connection $connection)
+    {
+        $this->connection = $connection;
+        $this->dialect = hydrahon::Mysql();
+    }
+
+    /**
+     * With a dialect of your own: `hydrahon::Mysql($mariadb: true)` for MariaDB.
+     */
+    public constructor(mysql::Connection $connection, dialect: hydrahon::Mysql $dialect)
+    {
+        $this->connection = $connection;
+        $this->dialect = $dialect;
+    }
+
+    /**
+     * Connect to `mysql://user:password@host:port/database`.
+     */
+    public static function open(const string& $url) : result<Driver, Error>
+    {
+        mysql::Connection $c = guard mysql::Connection::open($url) else ($e) { return .error(Driver::failure($e)); }
+        return .ok(Driver($c));
+    }
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public function query(const Statement& $s) : result<carbon::Cursor, Error>
+    {
+        mysql::Rows $rows = guard $this->connection->stream($s->text, Params::of($s->params)) else ($e) {
+            return .error(Driver::failure($e));
+        }
+        carbon::Cursor $c = Cursor($rows);
+        return .ok($c);
+    }
+
+    public function exec(const Statement& $s) : result<Written, Error>
+    {
+        mysql::Outcome $o = guard $this->connection->exec($s->text, Params::of($s->params)) else ($e) {
+            return .error(Driver::failure($e));
+        }
+        return .ok(Written($o->affectedRows, $o->lastInsertId));
+    }
+
+    public const function traits() : Traits
+    {
+        return Traits(false);
+    }
+
+    public function begin() : status<Error>
+    {
+        if ($this->open != null) {
+            return .error(.nested);
+        }
+        mysql::Transaction $t = guard $this->connection->begin() else ($e) { return .error(Driver::failure($e)); }
+        $this->open = $t;
+        return .ok();
+    }
+
+    public function commit() : status<Error>
+    {
+        mysql::Transaction $t = guard $this->open else { return .error(.missing); }
+        $this->open = null;
+        guard $t->commit() else ($e) { return .error(Driver::failure($e)); }
+        return .ok();
+    }
+
+    public function rollback() : status<Error>
+    {
+        mysql::Transaction $t = guard $this->open else { return .error(.missing); }
+        $this->open = null;
+        guard $t->rollback() else ($e) { return .error(Driver::failure($e)); }
+        return .ok();
+    }
+
+    /**
+     * A libmysql error in carbon's terms.
+     */
+    public static function failure(const mysql::Error& $e) : Error
+    {
+        Fault $fault = .other;
+        string? $state = $e->state();
+        mysql::ErrorCode? $code = $e->code();
+        if ($e->is(.dupEntry)) {
+            $fault = .duplicate;
+        } else if ($e->is(.rowIsReferenced) || $e->is(.noReferencedRow)) {
+            $fault = .reference;
+        } else if ($e->retryable()) {
+            $fault = .deadlock;
+        } else if ($state != null) {
+            string $s = guard $state;
+            if ($s->starts('23')) {
+                $fault = .constraint;
+            }
+        }
+        match ($e) {
+            mysql::Error::transport($t) => {
+                $fault = .connection;
+            },
+            mysql::Error::closed => {
+                $fault = .connection;
+            },
+            mysql::Error::timeout => {
+                $fault = .connection;
+            },
+            else => {
+            },
+        };
+        int64? $number = null;
+        if ($code != null) {
+            mysql::ErrorCode $c = guard $code;
+            $number = $c->value() as int64;
+        }
+        return .driver(Failure($fault, $e->message(), $state, $number));
+    }
+}

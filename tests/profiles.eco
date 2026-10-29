@@ -1,0 +1,100 @@
+/*
+ * Codec columns on a model: fixtures::Profile has one per codec carbon brings and one of its own.
+ *
+ * Its repository is the generated `carbon::Records` alias, and echoc 0.11.4 loses a generic
+ * class's interface defaults when the alias is used in a file read before the one declaring it:
+ * files are read in path order, so this one has to sort after tests/fixtures/.
+ */
+
+use carbon::Error;
+use hydrahon::Value;
+use fixtures::{World, Profile, Money};
+
+/**
+ * A stored profile row: `{"a":1}`, no extra, three views, two tags, two steps, 2.50.
+ */
+function profileRow() : array<Value>
+{
+    return [Value::from(1), Value::from('{"a":1}'), Value::none, Value::from('{"views":3}'), Value::from('echo,orm'), Value::from("one\ntwo\n"), Value::from(250)];
+}
+
+const string PROFILES = 'SELECT `profiles`.`id`, `profiles`.`data`, `profiles`.`extra`, `profiles`.`counts`, `profiles`.`tags`, `profiles`.`steps`, `profiles`.`price` FROM `profiles`';
+
+test a_model_reads_every_codec_column
+{
+    $w = World();
+    $w->fake->rows([profileRow()]);
+    Profile $p = guard $w->profiles->find()->one(1);
+    string $profiles = PROFILES;
+    assert($w->fake->last() == "{$profiles} WHERE `profiles`.`id` = ? LIMIT 1");
+    assert(($p->data['a']->asInt() ?? 0) == 1);
+    assert($p->extra == null);
+    assert($p->counts['views'] == 3);
+    assert($p->tags->count() == 2 && $p->tags[1] == 'orm');
+    array<string> $steps = guard $p->steps;
+    assert($steps->count() == 2 && $steps[0] == 'one');
+    assert($p->price->cents == 250);
+    assert(!$p->dirty());
+}
+
+test a_json_value_changed_in_place_is_saved
+{
+    $w = World();
+    $w->fake->rows([profileRow()])->written(1);
+    Profile $p = guard $w->profiles->find()->one(1);
+    // the document shares its contents: this writes into the model
+    $p->data['b'] = 2;
+    assert($p->dirty());
+    guard $p->save();
+    assert($w->fake->last() == 'UPDATE `profiles` SET `data` = ? WHERE `profiles`.`id` = ?');
+    assert($w->fake->sent(1, [Value::from('{"a":1,"b":2}'), Value::from(1)]));
+    assert(!$p->dirty());
+}
+
+test sql_null_and_json_null_stay_apart
+{
+    $w = World();
+    $w->fake->written($insertId: 7)->written(1)->written(1);
+    array<string> $none = [];
+    Profile $p = guard $w->profiles->create(Profile($extra: json::nil(), $steps: $none, $price: Money($cents: 5)));
+    assert($p->id == 7);
+    assert($w->fake->last() == 'INSERT INTO `profiles` (`data`, `extra`, `counts`, `tags`, `steps`, `price`) VALUES (?, ?, ?, ?, ?, ?)');
+    assert($w->fake->sent(0, [Value::from('{}'), Value::from('null'), Value::from('{}'), Value::from(''), Value::from(''), Value::from(5)]));
+    // NULL is the field's null, not the document null
+    $p->extra = null;
+    $p->steps = null;
+    guard $p->save();
+    assert($w->fake->last() == 'UPDATE `profiles` SET `extra` = ?, `steps` = ? WHERE `profiles`.`id` = ?');
+    assert($w->fake->sent(1, [Value::none, Value::none, Value::from(7)]));
+    $p->tags = ['a,b', ''];
+    $p->counts['z'] = 1;
+    $p->counts['a'] = 2;
+    guard $p->save();
+    assert($w->fake->sent(2, [Value::from('{"a":2,"z":1}'), Value::from('"a,b",'), Value::from(7)]));
+}
+
+test a_refused_column_names_its_codec
+{
+    $w = World();
+    array<Value> $notJson = profileRow();
+    $notJson[1] = Value::from('{oops');
+    array<Value> $nullData = profileRow();
+    $nullData[1] = Value::none;
+    array<Value> $wrongCounts = profileRow();
+    $wrongCounts[3] = Value::from('{"views":"many"}');
+    array<Value> $negative = profileRow();
+    $negative[6] = Value::from(-1);
+    array<Value> $openQuote = profileRow();
+    $openQuote[4] = Value::from('"echo');
+    $w->fake->rows([$notJson])->rows([$nullData])->rows([$wrongCounts])->rows([$negative])->rows([$openQuote]);
+    result<array<Profile>, Error> $a = $w->profiles->all();
+    assert(str::from($a->failure())->starts('column data was refused by its codec: not json: '));
+    result<array<Profile>, Error> $b = $w->profiles->all();
+    assert(str::from($b->failure()) == 'column data is NULL but the field is not nullable');
+    result<array<Profile>, Error> $c = $w->profiles->all();
+    assert(str::from($c->failure()) == 'column counts was refused by its codec: field views is not an integer');
+    result<array<Profile>, Error> $d = $w->profiles->all();
+    assert(str::from($d->failure()) == 'column price was refused by its codec: a negative amount');
+    result<array<Profile>, Error> $e = $w->profiles->all();
+    assert(str::from($e->failure()) == 'column tags was refused by its codec: a quote is never closed');
+}

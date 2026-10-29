@@ -1,0 +1,36 @@
+namespace carbon::listen;
+
+/**
+ * A listener that keeps every statement. `count()` is how a test says "this costs two queries".
+ */
+public class Log : Listener
+{
+    public array<Ran> $entries = [];
+
+    public function ran(const Ran& $event) : void
+    {
+        $this->entries[] = $event;
+    }
+
+    public const function count() : usize
+    {
+        return $this->entries->count();
+    }
+
+    /**
+     * The SQL text of every statement, in order.
+     */
+    public const function texts() : array<string>
+    {
+        array<string> $out = [];
+        foreach ($this->entries as const &$e) {
+            $out[] = $e->statement->text;
+        }
+        return $out;
+    }
+
+    public function clear() : void
+    {
+        $this->entries = [];
+    }
+}

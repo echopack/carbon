@@ -1,0 +1,35 @@
+namespace carbon::codec;
+
+/**
+ * `map<string, bool>` as a JSON object: `{"k":true}`, keys in sorted order so the same map
+ * always stores the same text.
+ */
+public struct JsonBoolMap : carbon::Codec<map<string, bool>, string>
+{
+    public const function decode(string $raw) : result<map<string, bool>, carbon::Problem>
+    {
+        ordered_map<string, json::Value> $fields = guard Doc::fields($raw) else ($p) {
+            return .error($p);
+        }
+        map<string, bool> $out = [];
+        foreach ($fields as $k => const &$v) {
+            bool $x = guard $v->asBool() else {
+                return .error(Doc::field($k, 'a boolean'));
+            }
+            $out[$k] = $x;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const map<string, bool>& $value) : string
+    {
+        array<string> $keys = $value->keys();
+        $keys->sort();
+        json::Value $doc = json::object();
+        foreach ($keys as const &$k) {
+            bool $x = $value->get($k);
+            $doc[$k] = json::bool($x);
+        }
+        return json::dump($doc);
+    }
+}

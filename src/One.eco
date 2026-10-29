@@ -1,0 +1,41 @@
+namespace carbon;
+
+/**
+ * A slot for one related model (belongs to, has one). A loader fills it; reading it never runs
+ * a query, so an unloaded slot is simply empty.
+ */
+public struct One<T>
+{
+    internal T? $item;
+    internal bool $loaded;
+
+    public constructor()
+    {
+        $this->item = null;
+        $this->loaded = false;
+    }
+
+    public static function unloaded() : One<T>
+    {
+        return One<T>();
+    }
+
+    /**
+     * The related model, null when there is none or the slot was never loaded.
+     */
+    public const function get() : T?
+    {
+        return $this->item;
+    }
+
+    public const function loaded() : bool
+    {
+        return $this->loaded;
+    }
+
+    public function set(T? $item) : void
+    {
+        $this->item = $item;
+        $this->loaded = true;
+    }
+}

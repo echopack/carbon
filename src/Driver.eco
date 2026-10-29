@@ -1,0 +1,30 @@
+namespace carbon;
+
+/**
+ * A database behind carbon. A driver renders hydrahon statements in its dialect and runs them;
+ * everything else (mapping, timestamps, relations) is carbon's job. Adding a database means
+ * implementing this and `Cursor`.
+ */
+public interface Driver
+{
+    const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>;
+    const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>;
+    const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>;
+    const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>;
+
+    /**
+     * Run a statement that returns rows.
+     */
+    function query(const Statement& $s) : result<Cursor, Error>;
+
+    /**
+     * Run a statement that returns no rows.
+     */
+    function exec(const Statement& $s) : result<Written, Error>;
+
+    const function traits() : Traits;
+
+    function begin() : status<Error>;
+    function commit() : status<Error>;
+    function rollback() : status<Error>;
+}

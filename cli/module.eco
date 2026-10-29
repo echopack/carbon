@@ -1,0 +1,22 @@
+/*
+ * carbongen: writes carbon schemas for #[carbon::model] classes.
+ *
+ * Reads the module's declarations through `echoc -p decls`, checks every
+ * #[carbon::...] attribute, and writes `.carbon/models.eco`: one table class
+ * per model with its typed columns, the mapping carbon::Store needs, and a
+ * relation class per relation. A module of its own, so a broken checkout of the code
+ * it generates for cannot stop the tool that regenerates it.
+ */
+
+#[module: "carbongen"]
+#[version: "0.1.0"]
+#[sources: "src/*.eco"]
+#[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
+
+#[target: exe { name: "carbongen", entry: "main.eco" }] {
+    #[sources: "main.eco"]
+}
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

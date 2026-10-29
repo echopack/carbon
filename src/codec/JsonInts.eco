@@ -1,0 +1,33 @@
+namespace carbon::codec;
+
+/**
+ * `array<int64>` as a JSON array: `[1]`.
+ */
+public struct JsonInts : carbon::Codec<array<int64>, string>
+{
+    public const function decode(string $raw) : result<array<int64>, carbon::Problem>
+    {
+        array<json::Value> $items = guard Doc::list($raw) else ($p) {
+            return .error($p);
+        }
+        array<int64> $out = [];
+        int64 $at = 0;
+        foreach ($items as const &$v) {
+            int64 $x = guard $v->asInt() else {
+                return .error(Doc::item($at, 'an integer'));
+            }
+            $out[] = $x;
+            $at = $at + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<int64>& $value) : string
+    {
+        json::Value $doc = json::arr();
+        foreach ($value as const &$x) {
+            $doc[] = json::int($x);
+        }
+        return json::dump($doc);
+    }
+}

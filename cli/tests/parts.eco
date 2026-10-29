@@ -1,0 +1,140 @@
+namespace carbongen;
+
+/**
+ * The type tree `$text` (JSON) rendered back into Echo source.
+ */
+internal function rendered(const string& $text) : string
+{
+    json::Value $t = guard json::parse($text);
+    return Types::render($t);
+}
+
+test types_render_every_kind
+{
+    assert(rendered(TEXT) == 'string');
+    assert(rendered(prim('uint16')) == 'uint16');
+    assert(rendered(optional(prim('int64'))) == 'int64?');
+    assert(rendered('{"kind": "array", "of": {"kind": "string"}}') == 'array<string>');
+    assert(rendered('{"kind": "map", "key": {"kind": "string"}, "value": {"kind": "prim", "name": "int64"}}') == 'map<string, int64>');
+    assert(rendered(named('app::Post', '')) == 'app::Post');
+    assert(rendered(named('carbon::Link', named('app::PostRepository', ''))) == 'carbon::Link<app::PostRepository>');
+    assert(rendered(named('pair', both(prim('int8'), optional(TEXT)))) == 'pair<int8, string?>');
+    // a const field's type renders as the type
+    assert(rendered(fixed(prim('int64'))) == 'int64');
+    assert(rendered('{"kind": "function", "return": {"kind": "prim", "name": "int64"}, "params": [{"kind": "prim", "name": "int64"}, {"kind": "string"}], "extern": false}') == 'function<int64(int64, string)>');
+    assert(rendered('{"kind": "ptr", "to": {"kind": "named", "name": "app::Q"}, "borrow": false, "weak": true, "const": false, "nullable": false}') == 'weak<app::Q>');
+    assert(rendered('{"kind": "ptr", "to": {"kind": "prim", "name": "int32"}, "borrow": false, "weak": false, "const": false, "nullable": false}') == 'ptr<int32>');
+    assert(rendered('{"kind": "tuple"}') == '');
+}
+
+test types_argument_reads_one_type_argument
+{
+    json::Value $one = guard json::parse(named('carbon::One', named('app::User', '')));
+    assert(Types::argument($one, 'carbon::One') == 'app::User');
+    assert(Types::argument($one, 'carbon::Many') == '');
+    json::Value $two = guard json::parse(named('carbon::One', both(prim('int64'), TEXT)));
+    assert(Types::argument($two, 'carbon::One') == '');
+    json::Value $bare = guard json::parse(named('carbon::One', ''));
+    assert(Types::argument($bare, 'carbon::One') == '');
+    json::Value $text = guard json::parse(TEXT);
+    assert(Types::argument($text, 'carbon::One') == '');
+}
+
+test kinds_read_and_widen
+{
+    assert(Kinds::reader('int64') == 'int');
+    assert(Kinds::reader('uint64') == 'uint');
+    assert(Kinds::reader('float64') == 'float');
+    assert(Kinds::reader('string') == 'text');
+    assert(Kinds::reader('bool') == 'bool');
+    assert(Kinds::reader('hydrahon::Decimal') == 'decimal');
+    assert(Kinds::reader('hydrahon::Bytes') == 'bytes');
+    assert(Kinds::reader('hydrahon::Date') == 'date');
+    assert(Kinds::reader('hydrahon::DateTime') == 'datetime');
+    assert(Kinds::reader('hydrahon::Time') == 'time');
+    assert(Kinds::plain('hydrahon::Time') && Kinds::plain('bool'));
+    assert(!Kinds::plain('int32') && !Kinds::plain('usize') && !Kinds::plain('app::Status'));
+    assert(Kinds::widened('int8') == 'int64' && Kinds::widened('uint32') == 'int64');
+    assert(Kinds::widened('float32') == 'float64');
+    assert(Kinds::widened('int64') == '' && Kinds::widened('usize') == '');
+    array<string> $b = Kinds::bounds('int16');
+    assert($b->count() == 2 && $b[0] == '-32768' && $b[1] == '32767');
+    assert(Kinds::bounds('uint8')[1] == '255');
+    assert(Kinds::bounds('uint32')[1] == '4294967295');
+    assert(Kinds::bounds('int64')->count() == 0 && Kinds::bounds('float32')->count() == 0);
+}
+
+test json_reads_attributes
+{
+    string $text = field('x', 3, TEXT, both(tool('name', 'ex'), tool('skip', '')));
+    json::Value $f = guard json::parse($text);
+    assert(Json::has($f, 'name') && Json::has($f, 'skip') && !Json::has($f, 'key'));
+    assert(Json::tool($f, 'name') == 'ex');
+    // written without a value, or not written at all
+    assert(Json::tool($f, 'skip') == '' && Json::tool($f, 'key') == '');
+    assert(Json::tools($f)->count() == 2);
+    assert(Json::int($f, 'line') == 3 && Json::text($f, 'name') == 'x');
+    assert(!Json::flag($f, 'default') && !Json::flag($f, 'missing'));
+    assert(Json::items($f, 'missing')->count() == 0);
+    // attributes of another namespace are not carbon's
+    json::Value $other = guard json::parse('{"tools": [{"namespace": "rest", "name": "name", "value": null}]}');
+    assert(Json::tools($other)->count() == 0 && !Json::has($other, 'name'));
+}
+
+test directions_name_their_attribute
+{
+    assert(Direction::belongsTo->tool() == 'belongsTo');
+    assert(Direction::hasOne->tool() == 'hasOne');
+    assert(Direction::hasMany->tool() == 'hasMany');
+    json::Value $f = guard json::parse(field('x', 1, TEXT, both(tool('hasMany', 'a'), tool('belongsTo', 'b'))));
+    array<Direction> $d = Direction::marked($f);
+    assert($d->count() == 2 && $d[0] == Direction::belongsTo && $d[1] == Direction::hasMany);
+    json::Value $none = guard json::parse(field('y', 1, TEXT, ''));
+    assert(Direction::marked($none)->count() == 0);
+}
+
+test model_names_its_generated_types
+{
+    array<Column> $none = [];
+    array<string> $no = [];
+    array<Relation> $nothing = [];
+    Model $m = Model('app::models::LineItem', 'line_items', '', 'app::models::LineItemRepository', 'link', $none, 0, true, $no, $no, '', $nothing);
+    assert($m->space() == 'app::models');
+    assert($m->handle() == 'LineItemTable' && $m->qualifiedHandle() == 'app::models::LineItemTable');
+    assert($m->aliasClass() == 'LineItemTableAlias' && $m->rowsAlias() == 'LineItemRows');
+    assert($m->queryStruct() == 'LineItemQuery' && $m->repositoryAlias() == 'LineItemRepository');
+    assert($m->relationsInterface() == 'LineItemRelations' && $m->loadStruct() == 'LineItemLoad' && $m->loadingInterface() == 'LineItemLoading');
+    Relation $r = Relation('order', Direction::belongsTo, 'app::Order', 'orderId');
+    assert($m->relationClass($r) == 'LineItemOrderRelation' && $m->relationMethod($r) == 'withOrder');
+    assert($m->schemaLiteral() == 'null');
+    $m->schema = 'shop';
+    assert($m->schemaLiteral() == "'shop'");
+    // a model outside any namespace qualifies nothing
+    Model $g = Model('Note', 'notes', '', 'NoteRepository', 'link', $none, 0, true, $no, $no, '', $nothing);
+    assert($g->space() == '' && $g->qualify('NoteTable') == 'NoteTable' && $g->qualifiedHandle() == 'NoteTable');
+}
+
+test columns_spell_their_types
+{
+    Column $plain = Column('title', 'title', 'string', true, 'string', .plain, '', '');
+    assert($plain->field() == 'string?' && $plain->term() == 'string?' && $plain->reader() == 'text');
+    assert($plain->declared() == 'hydrahon::Term<string?>' && !$plain->typed());
+    assert($plain->reach('PostTable') == 'PostTable::$title');
+    Column $status = Column('status', 'status', 'app::Status', false, 'int64', .enumerated, 'app::Status', 'uint8');
+    assert($status->typed() && $status->columnClass() == 'StatusColumn' && $status->declared() == 'StatusColumn');
+    assert($status->reach('PostTable') == 'PostTable::$status->term');
+    // a nullable enum keeps the bare term
+    Column $maybe = Column('status', 'status', 'app::Status', true, 'int64', .enumerated, 'app::Status', 'uint8');
+    assert(!$maybe->typed() && $maybe->declared() == 'hydrahon::Term<int64?>' && $maybe->field() == 'app::Status?');
+    Column $narrow = Column('views', 'views', 'int32', false, 'int64', .narrow, '', '');
+    assert($narrow->field() == 'int32' && $narrow->term() == 'int64' && $narrow->reader() == 'int');
+}
+
+test failures_explain_themselves
+{
+    Failure $tool = Failure::tool('1', 'boom');
+    assert($tool->message() == "echoc -p decls failed (1):\nboom");
+    assert(Failure::input('no module.eco')->message() == 'no module.eco');
+    assert(Failure::problems(3)->message() == '3 problem(s) in #[carbon::...] declarations');
+    assert(Failure::stale->message() == '.carbon/models.eco is out of date; run carbongen');
+}

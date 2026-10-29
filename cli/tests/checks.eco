@@ -1,0 +1,452 @@
+namespace carbongen;
+
+test const_fields_carbon_writes_to_are_refused
+{
+    string $dt = named('hydrahon::DateTime', '');
+    array<string> $all = [
+        field('link', 1, fixed(named('carbon::Link', named('app::NoteRepository', ''))), '', true),
+        field('id', 2, fixed(prim('int64')), '', true),
+        // a const column carbon only reads is fine
+        field('title', 3, fixed(TEXT), ''),
+        field('createdAt', 4, fixed($dt), tool('created', ''), true),
+        field('updatedAt', 5, fixed($dt), tool('updated', ''), true),
+        field('gone', 6, fixed(optional($dt)), tool('deleted', ''), true),
+        field('ownerId', 7, prim('int64'), ''),
+        field('owner', 8, fixed(named('carbon::One', named('app::Note', ''))), tool('belongsTo', 'ownerId'), true),
+        field('total', 9, fixed(optional(prim('int64'))), tool('computed', ''), true),
+    ];
+    string $note = decl('class', 'app::Note', 1, tool('model', 'notes'), str::join($all, ', '));
+    array<string> $p = problems($note);
+    assert($p->count() == 7);
+    assert($p[0] == 'src/t.eco:1: app::Note::$link: the link cannot be const or private, carbon keeps the state of the model in it');
+    assert($p[1] == 'src/t.eco:4: app::Note::$createdAt: #[carbon::created] cannot go on a const field, carbon sets it');
+    assert($p[2] == 'src/t.eco:5: app::Note::$updatedAt: #[carbon::updated] cannot go on a const field, carbon sets it');
+    assert($p[3] == 'src/t.eco:6: app::Note::$gone: #[carbon::deleted] cannot go on a const field, carbon sets it');
+    assert($p[4] == 'src/t.eco:8: app::Note::$owner: a relation slot cannot be const or private, its loader fills it');
+    assert($p[5] == 'src/t.eco:9: app::Note::$total: a computed field cannot be const, carbon fills it after the columns');
+    assert($p[6] == "src/t.eco:2: app::Note::$id: a key the database generates cannot be const, carbon sets it after the insert; drop const or mark it #[carbon::key: 'assigned']");
+}
+
+test private_links_and_slots_are_refused
+{
+    array<string> $all = [
+        field('link', 1, named('carbon::Link', named('app::NoteRepository', '')), '', true, 'private'),
+        field('id', 2, prim('int64'), '', true),
+        field('kids', 3, named('carbon::Many', named('app::Note', '')), tool('hasMany', 'parentId'), true, 'private'),
+        field('parentId', 4, prim('int64'), ''),
+        // internal is fine: the generated code is part of the module
+        field('parent', 5, named('carbon::One', named('app::Note', '')), tool('belongsTo', 'parentId'), true, 'internal'),
+    ];
+    array<string> $p = problems(decl('class', 'app::Note', 1, tool('model', 'notes'), str::join($all, ', ')));
+    assert($p->count() == 2);
+    assert($p[0] == 'src/t.eco:1: app::Note::$link: the link cannot be const or private, carbon keeps the state of the model in it');
+    assert($p[1] == 'src/t.eco:3: app::Note::$kids: a relation slot cannot be const or private, its loader fills it');
+}
+
+test a_const_key_the_app_assigns_is_fine
+{
+    string $fields = link('app::SettingRepository');
+    $fields->append(', ');
+    $fields->append(field('name', 2, fixed(TEXT), tool('key', 'assigned')));
+    $fields->append(', ');
+    $fields->append(field('code', 3, fixed(prim('int64')), ''));
+    assert(problems(decl('class', 'app::Setting', 1, tool('model', 'settings'), $fields))->count() == 0);
+    // a marked int64 key without a mode is generated, so const is refused there too
+    string $marked = link('app::CodeRepository');
+    $marked->append(', ');
+    $marked->append(field('code', 6, fixed(prim('int64')), tool('key', '')));
+    array<string> $p = problems(decl('class', 'app::Code', 5, tool('model', 'codes'), $marked));
+    assert($p->count() == 1);
+    assert($p[0] == "src/t.eco:6: app::Code::$code: a key the database generates cannot be const, carbon sets it after the insert; drop const or mark it #[carbon::key: 'assigned']");
+}
+
+test generated_relation_types_cannot_take_a_declared_name
+{
+    array<string> $names = ['PostRelations', 'PostLoad', 'PostLoading'];
+    foreach ($names as const &$name) {
+        string $taken = decl('struct', "app::{$name}", 40, '', '');
+        array<string> $p = problems(both($taken, blog()));
+        assert($p->count() == 1);
+        assert($p[0] == "src/t.eco:20: app::Post: the generated app::{$name} would clash with the declaration of that name");
+    }
+    // a relation class against any declaration, not only a model
+    string $relation = decl('struct', 'app::PostAuthorRelation', 40, '', '');
+    array<string> $p = problems(both($relation, blog()));
+    assert($p->count() == 1);
+    assert($p[0] == 'app::Post::$author: its generated class PostAuthorRelation would clash with the declaration of app::PostAuthorRelation; rename the relation');
+}
+
+test attributes_that_do_nothing_are_reported
+{
+    array<string> $all = [
+        field('link', 1, named('carbon::Link', named('app::NoteRepository', '')), tool('name', 'l'), true),
+        field('id', 2, prim('int64'), '', true),
+        shared(field('count', 3, prim('int64'), tool('key', ''), true)),
+        field('cache', 4, TEXT, both(tool('skip', ''), tool('name', 'c')), true),
+        field('parent', 5, named('carbon::One', named('app::Note', '')), both(tool('belongsTo', 'id'), tool('computed', '')), true),
+    ];
+    string $note = decl('class', 'app::Note', 1, tool('model', 'notes'), str::join($all, ', '));
+    array<string> $p = problems($note);
+    assert($p->count() == 4);
+    assert($p[0] == 'src/t.eco:1: app::Note::$link: #[carbon::name] does nothing on the carbon::Link field');
+    assert($p[1] == 'src/t.eco:3: app::Note::$count: #[carbon::key] does nothing on a static field, which is no column');
+    assert($p[2] == 'src/t.eco:4: app::Note::$cache: #[carbon::name] does nothing beside #[carbon::skip]');
+    assert($p[3] == 'src/t.eco:5: app::Note::$parent: #[carbon::computed] does nothing on a relation slot');
+}
+
+test a_static_field_of_a_table_takes_no_attribute
+{
+    string $f = shared(field('total', 3, prim('int64'), tool('name', 't'), true));
+    $f->append(', ');
+    $f->append(field('noteId', 4, prim('int64'), ''));
+    array<string> $p = problems(decl('struct', 'app::Pivot', 2, tool('table', 'pivot'), $f));
+    assert($p->count() == 1);
+    assert($p[0] == 'src/t.eco:3: app::Pivot::$total: #[carbon::name] does nothing on a static field, which is no column');
+}
+
+test a_generic_model_is_refused
+{
+    array<string> $none = [];
+    string $box = str::replace(model('app::Box', 'boxes', 1, 'app::BoxRepository', $none), '"constructors": []', '"constructors": [], "generics": [{"name": "T", "constraint": null}]');
+    array<string> $p = problems($box);
+    assert($p->count() == 1);
+    assert($p[0] == 'src/t.eco:1: app::Box: a model cannot be generic, its table maps one type');
+}
+
+test computed_fields_take_distinct_names
+{
+    array<string> $more = [
+        field('likes', 3, optional(prim('int64')), both(tool('computed', ''), tool('name', 'n')), true),
+        field('views', 4, optional(prim('int64')), both(tool('computed', ''), tool('name', 'n')), true),
+    ];
+    array<string> $p = problems(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($p->count() == 1);
+    assert($p[0] == "src/t.eco:4: app::Note::$views: column 'n' is already taken by $likes");
+}
+
+test soft_delete_does_not_mix_with_stamps
+{
+    string $dt = optional(named('hydrahon::DateTime', ''));
+    array<string> $more = [
+        field('gone', 3, $dt, both(tool('created', ''), tool('deleted', '')), true),
+        field('left', 4, $dt, both(tool('deleted', ''), tool('updated', '')), true),
+    ];
+    array<string> $p = problems(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($p->count() == 3);
+    assert($p[0] == 'src/t.eco:3: app::Note::$gone: #[carbon::deleted] does not mix with #[carbon::created] or #[carbon::updated], carbon would trash the row as it writes it');
+    assert($p[1] == 'src/t.eco:4: app::Note::$left: #[carbon::deleted] does not mix with #[carbon::created] or #[carbon::updated], carbon would trash the row as it writes it');
+    assert($p[2] == 'src/t.eco:4: app::Note::$left: one #[carbon::deleted] per model');
+}
+
+test a_repository_keeps_one_model
+{
+    array<string> $none = [];
+    string $repo = decl('class', 'app::Shelf', 30, '', '');
+    string $a = model('app::Book', 'books', 1, 'app::Shelf', $none);
+    string $b = model('app::Map', 'maps', 5, 'app::Shelf', $none);
+    array<string> $p = problems("{$repo}, {$a}, {$b}");
+    assert($p->count() == 1);
+    assert($p[0] == 'src/t.eco:5: app::Map: app::Shelf already keeps the app::Book models; a repository keeps one model');
+}
+
+test a_codec_is_found_in_the_model_namespace_first
+{
+    string $list = '{"kind": "array", "of": {"kind": "string"}}';
+    string $outer = codec('Csv', prim('int64'), TEXT);
+    string $inner = codec('app::Csv', $list, TEXT);
+    array<string> $more = [field('tags', 3, $list, tool('codec', 'Csv'), true)];
+    string $note = model('app::Note', 'notes', 1, 'app::NoteRepository', $more);
+    Schema $s = Schema::read(decls("{$outer}, {$inner}, {$note}"));
+    assert($s->problems->count() == 0);
+    assert($s->models[0]->columns[1]->via == 'app::Csv');
+    // a qualified name is taken as written
+    array<string> $qualified = [field('tags', 3, prim('int64'), tool('codec', 'Csv'), true)];
+    string $other = model('app::Other', 'others', 1, 'app::OtherRepository', $qualified);
+    Schema $t = Schema::read(decls("{$outer}, {$other}"));
+    assert($t->problems->count() == 0);
+    assert($t->models[0]->columns[1]->via == 'Csv' && $t->models[0]->columns[1]->base == 'string');
+}
+
+test reports_codec_problems
+{
+    string $list = '{"kind": "array", "of": {"kind": "string"}}';
+    string $narrow = codec('app::Small', $list, prim('int32'));
+    array<string> $more = [
+        field('a', 3, $list, tool('codec', 'Csv'), true),
+        field('b', 4, $list, tool('codec', 'Ghost'), true),
+        field('c', 5, $list, tool('codec', 'app::Small'), true),
+        field('d', 6, $list, tool('codec', ''), true),
+        field('e', 7, prim('int64'), tool('codec', 'json'), true),
+        field('f', 8, named('json::Value', ''), tool('codec', 'csv'), true),
+        field('g', 9, $list, tool('cast', 'json'), true),
+    ];
+    array<string> $p = problems(both($narrow, model('app::Note', 'notes', 1, 'app::NoteRepository', $more)));
+    assert($p->count() == 8);
+    assert($p[0] == "src/t.eco:3: app::Note::$a: #[carbon::codec] names 'Csv', which is neither one of carbon's (json, csv, lines) nor declared in this module");
+    assert($p[1] == "src/t.eco:4: app::Note::$b: #[carbon::codec] names 'Ghost', which is neither one of carbon's (json, csv, lines) nor declared in this module");
+    assert($p[2] == 'src/t.eco:5: app::Note::$c: app::Small has to conform to carbon::Codec<array<string>, Raw> with Raw a column type such as string or int64');
+    assert($p[3] == "src/t.eco:6: app::Note::$d: #[carbon::codec] names '', which is neither one of carbon's (json, csv, lines) nor declared in this module");
+    assert($p[4] == 'src/t.eco:7: app::Note::$e: the json codec stores json::Value, array<string|int64|float64|bool> or map<string, string|int64|float64|bool>, not int64; write a carbon::Codec<int64, Raw> for it');
+    assert($p[5] == 'src/t.eco:8: app::Note::$f: the csv codec stores array<string>, not json::Value; write a carbon::Codec<json::Value, Raw> for it');
+    // the attribute before codecs is gone
+    assert($p[6] == 'src/t.eco:9: app::Note::$g: unknown attribute #[carbon::cast]');
+    assert($p[7]->contains('app::Note::$g: no column type for array<string>'));
+}
+
+test carbon_codecs_are_found_by_name_and_field_type
+{
+    string $strings = '{"kind": "array", "of": {"kind": "string"}}';
+    string $ints = '{"kind": "array", "of": {"kind": "prim", "name": "int64"}}';
+    string $floats = '{"kind": "array", "of": {"kind": "prim", "name": "float64"}}';
+    string $bools = '{"kind": "array", "of": {"kind": "prim", "name": "bool"}}';
+    string $words = '{"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}';
+    string $counts = '{"kind": "map", "key": {"kind": "string"}, "value": {"kind": "prim", "name": "int64"}}';
+    string $weights = '{"kind": "map", "key": {"kind": "string"}, "value": {"kind": "prim", "name": "float64"}}';
+    string $flags = '{"kind": "map", "key": {"kind": "string"}, "value": {"kind": "prim", "name": "bool"}}';
+    // a codec of the module named like one of carbon's is reached by its full name
+    string $mine = codec('app::json', prim('int64'), TEXT);
+    array<string> $more = [
+        field('doc', 3, named('json::Value', ''), tool('codec', 'json'), true),
+        field('extra', 4, optional(named('json::Value', '')), tool('codec', 'json'), true),
+        field('a', 5, $strings, tool('codec', 'json'), true),
+        field('b', 6, $ints, tool('codec', 'json'), true),
+        field('c', 7, $floats, tool('codec', 'json'), true),
+        field('d', 8, $bools, tool('codec', 'json'), true),
+        field('e', 9, $words, tool('codec', 'json'), true),
+        field('f', 10, $counts, tool('codec', 'json'), true),
+        field('g', 11, $weights, tool('codec', 'json'), true),
+        field('h', 12, $flags, tool('codec', 'json'), true),
+        field('tags', 13, $strings, tool('codec', 'csv'), true),
+        field('steps', 14, optional($strings), tool('codec', 'lines'), true),
+        field('n', 15, prim('int64'), tool('codec', 'app::json'), true),
+    ];
+    Schema $s = Schema::read(decls(both($mine, model('app::Note', 'notes', 1, 'app::NoteRepository', $more))));
+    assert($s->problems->count() == 0);
+    array<Column> $c = $s->models[0]->columns;
+    array<string> $via = ['Json', 'Json', 'JsonStrings', 'JsonInts', 'JsonFloats', 'JsonBools', 'JsonStringMap', 'JsonIntMap', 'JsonFloatMap', 'JsonBoolMap', 'Csv', 'Lines'];
+    foreach ($via as $i => const &$v) {
+        Column $col = $c[$i + 1];
+        assert($col->shape == Shape::codec && $col->base == 'string');
+        assert($col->via == "carbon::codec::{$v}");
+    }
+    assert(!$c[1]->nullable && $c[2]->nullable && $c[12]->nullable);
+    assert($c[13]->via == 'app::json' && $c[13]->base == 'string');
+}
+
+test an_enum_column_needs_an_integer_backing
+{
+    array<string> $enums = [
+        enumeration('app::Flag', prim('bool')),
+        enumeration('app::Ratio', prim('float64')),
+        enumeration('app::Code', TEXT),
+        enumeration('app::Mood', ''),
+    ];
+    array<string> $more = [
+        field('flag', 3, named('app::Flag', ''), '', true),
+        field('ratio', 4, named('app::Ratio', ''), '', true),
+        field('code', 5, named('app::Code', ''), '', true),
+        field('mood', 6, named('app::Mood', ''), '', true),
+    ];
+    $enums[] = model('app::Note', 'notes', 1, 'app::NoteRepository', $more);
+    array<string> $p = problems(str::join($enums, ', '));
+    assert($p->count() == 4);
+    assert($p[0] == 'src/t.eco:3: app::Note::$flag: an enum column needs an integer backing: enum app::Flag : uint8');
+    assert($p[1] == 'src/t.eco:4: app::Note::$ratio: an enum column needs an integer backing: enum app::Ratio : uint8');
+    assert($p[2] == 'src/t.eco:5: app::Note::$code: an enum column needs an integer backing: enum app::Code : uint8');
+    assert($p[3] == 'src/t.eco:6: app::Note::$mood: an enum column needs an integer backing: enum app::Mood : uint8');
+}
+
+test reports_more_model_problems
+{
+    string $dt = named('hydrahon::DateTime', '');
+    array<string> $more = [
+        field('userId', 3, prim('int64'), ''),
+        field('user_id', 4, prim('int64'), '', false),
+        field('other', 5, TEXT, tool('name', 'user_id')),
+        field('carbonTable', 6, TEXT, ''),
+        field('link2', 7, named('carbon::Link', named('app::NoteRepository', '')), '', true),
+        field('made', 8, TEXT, tool('created', '')),
+        field('changed', 9, prim('int64'), tool('updated', '')),
+        field('gone', 10, optional($dt), tool('deleted', ''), true),
+        field('left', 11, optional($dt), tool('deleted', ''), true),
+        field('code', 12, prim('int64'), tool('key', '')),
+        field('nick', 13, TEXT, tool('name', '')),
+        field('count', 14, prim('int64'), tool('computed', '')),
+        field('total', 15, optional(prim('int64')), both(tool('computed', ''), tool('key', '')), true),
+        field('serial', 16, prim('int64'), tool('key', ''), true),
+    ];
+    string $fields = fields('app::NoteRepository', $more);
+    array<string> $marks = [tool('model', 'notes'), tool('schema', ''), tool('columns', 'weird')];
+    string $tools = str::join($marks, ', ');
+    string $note = str::replace(decl('class', 'app::Note', 1, $tools, $fields), '"constructors": []', '"constructors": [{"line": 20}]');
+    array<string> $p = problems($note);
+    assert($p->count() == 15);
+    assert($p[0] == 'src/t.eco:1: app::Note: #[carbon::schema] needs a name');
+    assert($p[1] == 'src/t.eco:1: app::Note: #[carbon::columns] is snake (the default) or exact');
+    assert($p[2] == 'src/t.eco:1: app::Note: a model keeps the implicit constructor, carbon builds it field by field');
+    assert($p[3] == "src/t.eco:4: app::Note::$user_id: column 'user_id' is already taken by $userId");
+    assert($p[4] == "src/t.eco:5: app::Note::$other: column 'user_id' is already taken by $userId");
+    assert($p[5] == "src/t.eco:5: app::Note::$other: column 'user_id' is already taken by $user_id");
+    assert($p[6] == 'src/t.eco:6: app::Note::$carbonTable: the generated table keeps its hydrahon table in this name; rename the field or mark it #[carbon::skip]');
+    assert($p[7] == 'src/t.eco:7: app::Note::$link2: a model has one carbon::Link');
+    assert($p[8] == 'src/t.eco:8: app::Note::$made: #[carbon::created] goes on a hydrahon::DateTime field');
+    assert($p[9] == 'src/t.eco:9: app::Note::$changed: #[carbon::updated] goes on a hydrahon::DateTime field');
+    assert($p[10] == 'src/t.eco:11: app::Note::$left: one #[carbon::deleted] per model');
+    assert($p[11] == 'src/t.eco:13: app::Note::$nick: #[carbon::name] needs a column name');
+    assert($p[12] == 'src/t.eco:14: app::Note::$count: a computed field is only there when a query selects it, so it needs to be nullable or have a default');
+    assert($p[13] == 'src/t.eco:15: app::Note::$total: a computed field is only read: no key, timestamp or codec');
+    assert($p[14] == 'src/t.eco:1: app::Note: one key per model, 2 are marked');
+}
+
+test a_model_needs_a_table_a_key_and_columns
+{
+    string $unnamed = decl('class', 'app::A', 1, tool('model', ''), link('app::ARepository'));
+    array<string> $title = [field('title', 4, TEXT, '')];
+    string $keyless = decl('class', 'app::B', 3, tool('model', 'bs'), fields('app::BRepository', $title));
+    string $empty = decl('class', 'app::C', 6, tool('model', 'cs'), link('app::CRepository'));
+    string $loose = decl('struct', 'app::D', 8, tool('schema', 'x'), '');
+    array<string> $all = [$unnamed, $keyless, $empty, $loose];
+    array<string> $p = problems(str::join($all, ', '));
+    assert($p->count() == 5);
+    assert($p[0] == "src/t.eco:1: app::A: #[carbon::model] needs the table name: #[carbon::model: 'posts']");
+    assert($p[1] == 'src/t.eco:3: app::B: no key; mark one field #[carbon::key]');
+    assert($p[2] == 'src/t.eco:6: app::C: no key; mark one field #[carbon::key]');
+    assert($p[3] == 'src/t.eco:6: app::C: #[carbon::model] without a single column');
+    assert($p[4] == 'src/t.eco:8: app::D: #[carbon::...] needs #[carbon::model] or #[carbon::table] on the same type');
+}
+
+test reports_more_relation_problems
+{
+    array<string> $more = [
+        field('ownerId', 3, prim('int64'), ''),
+        field('kids', 4, named('carbon::One', named('app::Note', '')), tool('hasMany', 'ownerId'), true),
+        field('owner', 5, named('carbon::Many', named('app::Note', '')), tool('belongsTo', 'ownerId'), true),
+        field('pinned', 6, named('carbon::Many', named('app::Note', '')), tool('hasOne', 'ownerId'), true),
+        field('both', 7, named('carbon::One', named('app::Note', '')), both(tool('belongsTo', 'ownerId'), tool('hasOne', 'ownerId')), true),
+        field('unnamed', 8, named('carbon::One', named('app::Note', '')), tool('belongsTo', ''), true),
+    ];
+    array<string> $p = problems(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($p->count() == 5);
+    assert($p[0] == 'src/t.eco:4: app::Note::$kids: #[carbon::hasMany] fills a carbon::Many<T>');
+    assert($p[1] == 'src/t.eco:5: app::Note::$owner: #[carbon::belongsTo] and #[carbon::hasOne] fill a carbon::One<T>');
+    assert($p[2] == 'src/t.eco:6: app::Note::$pinned: #[carbon::belongsTo] and #[carbon::hasOne] fill a carbon::One<T>');
+    assert($p[3] == 'src/t.eco:7: app::Note::$both: one relation per slot');
+    assert($p[4] == "src/t.eco:8: app::Note::$unnamed: name the key field: #[carbon::belongsTo: 'authorId']");
+}
+
+test relation_keys_are_checked_against_both_models
+{
+    array<string> $user = [field('name', 3, TEXT, '')];
+    array<string> $note = [
+        field('authorId', 11, prim('int32'), ''),
+        field('author', 12, named('carbon::One', named('app::User', '')), tool('belongsTo', 'authorId'), true),
+        field('editor', 13, named('carbon::One', named('app::User', '')), tool('belongsTo', 'editorId'), true),
+        field('likes', 14, named('carbon::Many', named('app::User', '')), tool('hasMany', 'name'), true),
+    ];
+    string $u = model('app::User', 'users', 1, 'app::UserRepository', $user);
+    string $n = model('app::Note', 'notes', 9, 'app::NoteRepository', $note);
+    array<string> $p = problems(both($u, $n));
+    assert($p->count() == 3);
+    assert($p[0] == 'app::Note::$author: authorId has to be int64 like the key of app::User');
+    assert($p[1] == 'app::Note::$editor: #[carbon::belongsTo] names editorId, which is no column of app::Note');
+    assert($p[2] == 'app::Note::$likes: app::User::$name has to be int64 like the key of app::Note');
+}
+
+test two_queries_for_one_model
+{
+    string $a = '{"kind": "struct", "qualified": "app::Recent", "file": "src/t.eco", "line": 50, "tools": [], "fields": [], "conforms": [{"kind": "named", "name": "carbon::Query", "args": [{"kind": "named", "name": "app::Note"}, {"kind": "named", "name": "app::Recent"}]}]}';
+    string $b = '{"kind": "struct", "qualified": "app::Old", "file": "src/t.eco", "line": 60, "tools": [], "fields": [], "conforms": [{"kind": "named", "name": "carbon::Query", "args": [{"kind": "named", "name": "app::Note"}, {"kind": "named", "name": "app::Old"}]}]}';
+    array<string> $none = [];
+    array<string> $all = [$a, $b, model('app::Note', 'notes', 1, 'app::NoteRepository', $none)];
+    array<string> $p = problems(str::join($all, ', '));
+    assert($p->count() == 1);
+    // the declarations are walked by name, so which one is named first is not fixed
+    assert($p[0]->contains('app::Note: two queries conform to carbon::Query<app::Note, …>: '));
+    assert($p[0]->contains('app::Recent') && $p[0]->contains('app::Old'));
+}
+
+test an_undeclared_repository_has_to_live_beside_the_model
+{
+    array<string> $id = [field('id', 2, prim('int64'), '', true)];
+    string $fields = fields('other::NoteRepository', $id);
+    array<string> $p = problems(decl('class', 'app::Note', 1, tool('model', 'notes'), $fields));
+    assert($p->count() == 1);
+    assert($p[0] == 'src/t.eco:1: app::Note: other::NoteRepository is not declared; declare it, or name one in app for carbongen to write');
+}
+
+test an_unknown_link_type_is_the_generated_repository
+{
+    // echoc cannot name a repository carbongen has not written yet: the decls pass says unknown
+    string $unknown = '{"name": "link", "visibility": "public", "static": false, "line": 2, "type": {"kind": "named", "name": "unknown"}, "default": true, "default_value": ".detached()", "tools": []}';
+    string $note = decl('class', 'app::Note', 1, tool('model', 'notes'), both($unknown, field('id', 3, prim('int64'), '', true)));
+    Schema $s = Schema::read(decls($note));
+    assert($s->problems->count() == 0);
+    assert($s->models[0]->repository == 'app::NoteRepository' && !$s->models[0]->repositoryDeclared);
+    string $out = Emitter($s)->render();
+    assert($out->contains('public type NoteRepository = carbon::Records<app::Note, app::NoteQuery, int64>;'));
+    // any other default is no link carbongen can tell
+    string $odd = str::replace($unknown, '.detached()', 'make()');
+    string $other = decl('class', 'app::Other', 1, tool('model', 'others'), both($odd, field('id', 3, prim('int64'), '', true)));
+    array<string> $p = problems($other);
+    assert($p->count() == 2);
+    assert($p[0] == "src/t.eco:2: app::Other::$link: no column type for unknown; add #[carbon::codec: 'json'] (or csv, lines, a codec of your own) or mark it #[carbon::skip]");
+    assert($p[1] == 'src/t.eco:1: app::Other: a model needs a carbon::Link<Repository> field: public carbon::Link<PostRepository> $link = .detached();');
+}
+
+test enums_of_one_name_cannot_share_a_column_type
+{
+    string $a = enumeration('a::Status', prim('uint8'));
+    string $b = str::replace(enumeration('b::Status', prim('uint8')), '"line": 1', '"line": 2');
+    array<string> $more = [
+        field('state', 3, named('a::Status', ''), '', true),
+        field('phase', 4, named('b::Status', ''), '', true),
+    ];
+    array<string> $all = [$a, $b, model('app::Note', 'notes', 1, 'app::NoteRepository', $more)];
+    array<string> $p = problems(str::join($all, ', '));
+    assert($p->count() == 1);
+    assert($p[0] == 'app::Note::$phase: b::Status and a::Status would both get the column type app::StatusColumn');
+    // one enum in two namespaces gets a column type in each
+    array<string> $one = [field('state', 3, named('a::Status', ''), '', true)];
+    string $x = model('x::Note', 'notes', 1, 'x::NoteRepository', $one);
+    string $y = model('y::Note', 'notes', 5, 'y::NoteRepository', $one);
+    array<string> $spread = [$a, $x, $y];
+    string $out = emitted(str::join($spread, ', '));
+    assert($out->contains("namespace x;\n") && $out->contains("namespace y;\n"));
+    assert($out->contains("operator (StatusColumn $column) == (a::Status $case) : hydrahon::Term<bool>"));
+    assert(!$out->contains("namespace a;"));
+}
+
+test reports_table_attribute_problems
+{
+    string $f = field('noteId', 4, prim('int64'), tool('key', ''));
+    string $onEnum = str::replace(enumeration('app::Kind', prim('uint8')), '"tools": []', str::replace('"tools": [X]', 'X', tool('table', 'kinds')));
+    string $unnamed = decl('struct', 'app::Pivot', 2, tool('table', ''), $f);
+    string $keyed = decl('struct', 'app::Cache', 3, both(tool('table', 'cache'), tool('schema', '')), $f);
+    array<string> $all = [$onEnum, $unnamed, $keyed];
+    array<string> $p = problems(str::join($all, ', '));
+    assert($p->count() == 4);
+    assert($p[0] == 'src/t.eco:1: app::Kind: #[carbon::table] belongs on a struct or a class');
+    assert($p[1] == "src/t.eco:2: app::Pivot: #[carbon::table] needs the table name: #[carbon::table: 'movie_genres']");
+    assert($p[2] == 'src/t.eco:3: app::Cache: #[carbon::schema] needs a name');
+    assert($p[3] == 'src/t.eco:4: app::Cache::$noteId: unknown attribute #[carbon::key]');
+}
+
+test two_relations_cannot_share_a_class
+{
+    array<string> $post = [
+        field('fooBar', 3, named('carbon::Many', named('app::Post', '')), tool('hasMany', 'parentId'), true),
+        field('parentId', 4, prim('int64'), ''),
+        // the same relation spelled with a capital: one class, one method
+        field('FooBar', 5, named('carbon::Many', named('app::Post', '')), tool('hasMany', 'parentId'), true),
+    ];
+    array<string> $postFoo = [
+        field('postId', 11, prim('int64'), ''),
+        field('bar', 12, named('carbon::One', named('app::Post', '')), tool('belongsTo', 'postId'), true),
+    ];
+    string $a = model('app::Post', 'posts', 1, 'app::PostRepository', $post);
+    string $b = model('app::PostFoo', 'post_foos', 10, 'app::PostFooRepository', $postFoo);
+    array<string> $p = problems(both($a, $b));
+    assert($p->count() == 2);
+    assert($p[0] == 'app::Post::$FooBar: its generated class PostFooBarRelation is the one of app::Post::$fooBar too; rename one of them');
+    assert($p[1] == 'app::PostFoo::$bar: its generated class PostFooBarRelation is the one of app::Post::$fooBar too; rename one of them');
+}

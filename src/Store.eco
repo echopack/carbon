@@ -1,0 +1,317 @@
+namespace carbon;
+
+use carbon::change::Changes;
+use carbon::change::Snapshot;
+use carbon::select::Selected;
+
+/**
+ * The engine that keeps models of type `M` (key `K`, schema `S`) in their table: reading rows
+ * into linked models, inserting, updating only what changed, soft and hard deletes, timestamps
+ * and observers. `R` is the repository models link to. A `Connection` makes one store per model
+ * the first time a query or a repository asks for it, and owns it from then on; apps never name
+ * it.
+ */
+public class Store<M, K, S, R>
+{
+    /**
+     * The schema: the generated table class, or one written by hand.
+     */
+    public const S $table;
+    internal weak<R> $owner = null;
+    internal array<Observer<M>> $observers = [];
+
+    public constructor()
+    {
+        $this->table = S();
+    }
+
+    /**
+     * Make `$owner` the repository the models of this store link to. `Db::register` calls this
+     * through `Repository::adopt`. Once the previous repository is gone a new one may take over;
+     * two live repositories for one model on one `Connection` are a wiring bug.
+     */
+    public function adopt(R& $owner) : void
+    {
+        R? $alive = strong($this->owner);
+        if ($alive != null) {
+            die('carbon: a second repository adopted a model on one Connection while the first is alive');
+        }
+        $this->owner = &$owner;
+    }
+
+    /**
+     * The repository models of this store link to, null when none is registered.
+     */
+    public const function owner() : R?
+    {
+        return strong($this->owner);
+    }
+
+    /**
+     * Run `$observer` around every write from now on, in the order observers were added.
+     */
+    public function observe(Observer<M> $observer) : void
+    {
+        $this->observers[] = $observer;
+    }
+
+    /**
+     * Link `$model` to the repository without saving it, so `$model->save()` can insert it
+     * later.
+     */
+    public function attach(M& $model) : void
+    {
+        $this->adopted();
+        Link<R>& $l = $this->table->link($model);
+        $l->repo = $this->owner;
+    }
+
+    /**
+     * Insert `$model` if its row does not exist yet, otherwise write the columns that changed
+     * since it was loaded or last saved. A clean model runs no query and no hook.
+     */
+    public function save(M& $model, Connection $db, R& $hooks) : status<Error>
+    {
+        if (!$this->table->link($model)->persisted) {
+            return $this->insert($model, $db, $hooks);
+        }
+        if (!$this->dirty($model)) {
+            return .ok();
+        }
+        if ($this->rekeyed($model)) {
+            return .error(.rekeyed);
+        }
+        guard $this->before(.updating, $model, $hooks) else ($e) { return .error($e); }
+        guard $this->update($model, $db, .updating) else ($e) { return .error($e); }
+        $this->after(.updating, $model, $hooks);
+        return .ok();
+    }
+
+    /**
+     * Delete `$model`'s row. A model with a soft delete column only gets it set.
+     */
+    public function delete(M& $model, Connection $db, R& $hooks) : status<Error>
+    {
+        if ($this->table->live() == null) {
+            return $this->purge($model, $db, $hooks);
+        }
+        if (!$this->table->link($model)->persisted) {
+            return .error(.missing);
+        }
+        if ($this->rekeyed($model)) {
+            return .error(.rekeyed);
+        }
+        guard $this->before(.deleting, $model, $hooks) else ($e) { return .error($e); }
+        return $this->retrash($model, $db, $hooks, .deleting, $db->clock->now());
+    }
+
+    /**
+     * Bring a soft deleted model back.
+     */
+    public function restore(M& $model, Connection $db, R& $hooks) : status<Error>
+    {
+        if ($this->table->live() == null || !$this->table->link($model)->persisted) {
+            return .error(.missing);
+        }
+        if ($this->rekeyed($model)) {
+            return .error(.rekeyed);
+        }
+        guard $this->before(.restoring, $model, $hooks) else ($e) { return .error($e); }
+        return $this->retrash($model, $db, $hooks, .restoring, null);
+    }
+
+    /**
+     * Set the soft delete timestamp to `$at` and write it. A failed write puts the old one back:
+     * a model left trashed (or live) while its row is not would turn its next `save` into a
+     * delete (or a restore).
+     */
+    internal function retrash(M& $model, Connection $db, R& $hooks, Event $event, hydrahon::DateTime? $at) : status<Error>
+    {
+        hydrahon::DateTime? $was = $this->table->trashed($model);
+        $this->table->trash($model, $at);
+        guard $this->update($model, $db, $event) else ($e) {
+            $this->table->trash($model, $was);
+            return .error($e);
+        }
+        $this->after($event, $model, $hooks);
+        return .ok();
+    }
+
+    /**
+     * Remove `$model`'s row for good, soft delete column or not.
+     */
+    public function purge(M& $model, Connection $db, R& $hooks) : status<Error>
+    {
+        if (!$this->table->link($model)->persisted) {
+            return .error(.missing);
+        }
+        if ($this->rekeyed($model)) {
+            return .error(.rekeyed);
+        }
+        guard $this->before(.deleting, $model, $hooks) else ($e) { return .error($e); }
+        // again after the hooks: one that rewrites the key would aim the statement at another row
+        if ($this->rekeyed($model)) {
+            return .error(.rekeyed);
+        }
+        hydrahon::Delete $q = hydrahon::Delete(from: $this->table->table());
+        $q->where($this->table->keyIs($this->table->keyOf($model)));
+        guard $db->exec($q) else ($e) { return .error($e); }
+        Link<R>& $l = $this->table->link($model);
+        $l->persisted = false;
+        $this->after(.deleting, $model, $hooks);
+        return .ok();
+    }
+
+    /**
+     * Whether `$model` has columns that differ from its row as last loaded or saved.
+     */
+    public function dirty(M& $model) : bool
+    {
+        Snapshot $now = $this->table->snapshot($model);
+        return !$this->table->link($model)->original->changes($now)->empty();
+    }
+
+    /**
+     * Whether `$model`'s key differs from the one it was loaded or last saved with. Writing
+     * through the new key would touch another row, or none.
+     */
+    internal function rekeyed(M& $model) : bool
+    {
+        Snapshot $now = $this->table->snapshot($model);
+        return $this->table->link($model)->original->changes($now)->has($this->table->keyAt());
+    }
+
+    /**
+     * Turn the cursor's rows into linked models. `$extra` names the computed fields the query
+     * selected after the columns.
+     */
+    public function load(Cursor& $rows, const Selected& $extra) : result<array<M>, Error>
+    {
+        array<M> $out = [];
+        while (true) {
+            bool $more = guard $rows->step() else ($e) { return .error($e); }
+            if (!$more) {
+                break;
+            }
+            M $model = guard $this->table->read($rows, $extra) else ($e) { return .error($e); }
+            $this->settle($model);
+            $out[] = mv $model;
+        }
+        return .ok(mv $out);
+    }
+
+    /**
+     * Link `$model` as a row that exists, with its current values as the clean state.
+     */
+    internal function settle(M& $model) : void
+    {
+        $this->adopted();
+        Snapshot $now = $this->table->snapshot($model);
+        Link<R>& $l = $this->table->link($model);
+        $l->repo = $this->owner;
+        $l->persisted = true;
+        $l->original = mv $now;
+    }
+
+    /**
+     * Stop on a model whose repository never adopted it: every model handed out would be
+     * detached. A wiring bug, so it stops release builds too.
+     */
+    internal const function adopted() : void
+    {
+        // set once, never cleared: this asks whether adopt ran, not whether the repository lives
+        if ($this->owner == null) {
+            die('carbon: no repository adopted this model; register its repository on the Db');
+        }
+    }
+
+    /**
+     * Insert `$model` as a new row. A model whose row exists is refused: inserting it again
+     * would leave it tracking a copy.
+     */
+    internal function insert(M& $model, Connection $db, R& $hooks) : status<Error>
+    {
+        if ($this->table->link($model)->persisted) {
+            return .error(.persisted);
+        }
+        $this->adopted();
+        guard $this->before(.creating, $model, $hooks) else ($e) { return .error($e); }
+        $this->table->stamp($model, .creating, $db->clock->now());
+        Changes $only = Changes(all: $this->table->fields()->count());
+        bool $generated = $this->table->generated();
+        if ($generated) {
+            $only->clear($this->table->keyAt());
+        }
+        hydrahon::Values $row = hydrahon::Values();
+        $this->table->write($model, $only, $row);
+        hydrahon::Insert $q = hydrahon::Insert(into: $this->table->table());
+        $q->row(mv $row);
+        if (!$generated) {
+            guard $db->exec($q) else ($e) { return .error($e); }
+        } else if ($db->driver->traits()->returning) {
+            array<hydrahon::Field> $fields = $this->table->fields();
+            $q->returning([$fields[$this->table->keyAt()]]);
+            Cursor $rows = guard $db->query($q) else ($e) { return .error($e); }
+            bool $one = guard $rows->step() else ($e) { return .error($e); }
+            if (!$one) {
+                return .error(.missing);
+            }
+            int64 $key = guard $rows->int(0) else { return .error(.column('key', Problem::of($rows, 0))); }
+            $this->table->inserted($model, $key);
+        } else {
+            Written $w = guard $db->exec($q) else ($e) { return .error($e); }
+            $this->table->inserted($model, $w->insertId as int64);
+        }
+        $this->settle($model);
+        $this->after(.creating, $model, $hooks);
+        return .ok();
+    }
+
+    /**
+     * Stamp and write the columns that changed. No hooks; the callers run them, and refuse a
+     * changed key before they do. A hook may still have changed it, so it is checked again.
+     */
+    internal function update(M& $model, Connection $db, Event $event) : status<Error>
+    {
+        $this->table->stamp($model, $event, $db->clock->now());
+        Snapshot $now = $this->table->snapshot($model);
+        Changes $only = $this->table->link($model)->original->changes($now);
+        if ($only->has($this->table->keyAt())) {
+            return .error(.rekeyed);
+        }
+        if ($only->empty()) {
+            return .ok();
+        }
+        hydrahon::Values $set = hydrahon::Values();
+        $this->table->write($model, $only, $set);
+        hydrahon::Update $q = hydrahon::Update($this->table->table());
+        $q->set(mv $set)->where($this->table->keyIs($this->table->keyOf($model)));
+        guard $db->exec($q) else ($e) { return .error($e); }
+        Link<R>& $l = $this->table->link($model);
+        $l->original = mv $now;
+        return .ok();
+    }
+
+    /**
+     * The repository's `before`, then every observer's. The first refusal stops the write.
+     */
+    internal function before(Event $event, M& $model, R& $hooks) : status<Error>
+    {
+        guard $hooks->before($event, $model) else ($e) { return .error($e); }
+        foreach ($this->observers as &$o) {
+            guard $o->before($event, $model) else ($e) { return .error($e); }
+        }
+        return .ok();
+    }
+
+    /**
+     * Every observer's `after`, then the repository's.
+     */
+    internal function after(Event $event, const M& $model, R& $hooks) : void
+    {
+        foreach ($this->observers as &$o) {
+            $o->after($event, $model);
+        }
+        $hooks->after($event, $model);
+    }
+}

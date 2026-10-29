@@ -1,0 +1,28 @@
+namespace carbongen;
+
+/**
+ * How a field's value reaches its column.
+ */
+public enum Shape : uint8
+{
+    /**
+     * Stored as it is: `int64`, `uint64`, `float64`, `bool`, `string`, a hydrahon value type.
+     */
+    case plain = 0;
+
+    /**
+     * A narrower number, widened to `int64` or `float64` on the way out and range checked on
+     * the way in.
+     */
+    case narrow = 1;
+
+    /**
+     * A backed enum, stored as its backing value.
+     */
+    case enumerated = 2;
+
+    /**
+     * Converted by a `carbon::Codec<T, Raw>`: one of carbon's or the module's own.
+     */
+    case codec = 3;
+}

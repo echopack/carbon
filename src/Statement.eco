@@ -1,0 +1,28 @@
+namespace carbon;
+
+/**
+ * A statement as it was sent: SQL text and bound parameters.
+ */
+public struct Statement
+{
+    public string $text;
+    public hydrahon::Params $params;
+
+    /**
+     * A statement without parameters, such as `BEGIN`.
+     */
+    public constructor(plain: string $text)
+    {
+        $this->text = $text;
+        $this->params = hydrahon::Params::from([]);
+    }
+
+    /**
+     * The statement hydrahon rendered.
+     */
+    public constructor(const hydrahon::Sql& $sql)
+    {
+        $this->text = $sql->text;
+        $this->params = $sql->params;
+    }
+}

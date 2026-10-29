@@ -1,0 +1,117 @@
+/**
+ * The blog, end to end on a real MySQL or MariaDB.
+ *
+ *   blog --url mysql://app:secret@127.0.0.1:3306/blog
+ *   CARBON_MYSQL_URL=mysql://... blog
+ *
+ * Drops and recreates the users, posts and comments tables, then walks
+ * through carbon: creating, publishing, the repositories' finders, eager
+ * loading, a bulk update and a transaction that rolls back.
+ */
+
+use blog::{Tables, User, Post, CommentQuery, UserRepository, PostRepository, CommentRepository};
+use carbon::{Db, Error};
+use carbon::mysql::Driver;
+use carbon::listen::Log;
+use std::env;
+use std::io;
+
+array<string> $argv = env::argv();
+string $url = string::from(env::var('CARBON_MYSQL_URL') ?? '');
+if ($argv->count() == 3 && $argv[1] == '--url') {
+    $url = $argv[2];
+}
+if ($url->empty()) {
+    io::println('usage: blog --url mysql://user:pass@host:3306/db');
+    io::println('       or set CARBON_MYSQL_URL');
+    env::exit(1);
+}
+
+// connect and lay down the tables
+Driver $driver = guard Driver::open($url) else ($e) { die("connect: {$e}"); }
+Db $db = Db($driver);
+foreach (Tables::recreate() as const &$sql) {
+    guard $db->run($sql) else ($e) { die("{$sql}: {$e}"); }
+}
+io::println('tables created');
+
+// every statement carbon runs from here on lands in the log
+Log $log = Log();
+$db->listen($log);
+
+// register the repositories once; from here on they are reached by type
+$db->register(UserRepository($db->connection()));
+$db->register(PostRepository($db->connection()));
+$db->register(CommentRepository($db->connection()));
+UserRepository $users = $db->repo<UserRepository>();
+PostRepository $posts = $db->repo<PostRepository>();
+CommentRepository $comments = $db->repo<CommentRepository>();
+
+// create
+User $mario = guard $users->create(User($email: 'mario@example.com', $name: 'Mario', $admin: true));
+User $boris = guard $users->create(User($email: 'boris@example.com', $name: 'Boris'));
+io::println("users      {$mario->name} #{$mario->id}, {$boris->name} #{$boris->id}");
+
+array<Post> $drafts = [];
+array<string> $titles = ['Typed SQL', 'Weak links', 'Draft ideas'];
+foreach ($titles as const &$title) {
+    Post $p = guard $posts->create(Post($authorId: $mario->id, $title: $title, $tags: ['echo', 'carbon']));
+    $drafts[] = $p;
+}
+Post $hello = guard $posts->create(Post($authorId: $boris->id, $title: 'Hello from Boris', $body: 'hi', $views: 1500));
+io::println("posts      {$drafts->count() + 1} written as drafts");
+
+// the repository's own operation, through its hooks
+guard $posts->publish($drafts[0]);
+guard $posts->publish($drafts[1]);
+guard $posts->publish($hello);
+io::println('published  3 of them');
+
+// the repositories' own finders
+array<Post> $active = guard $posts->active();
+array<Post> $feed = guard $posts->feed($mario, 0);
+array<Post> $found = guard $posts->search('Weak');
+io::println("finders    {$active->count()} active, {$feed->count()} in Mario's feed, {$found->count()} matching 'Weak'");
+uint64 $popular = guard $posts->find()->published()->popular(1000)->count();
+io::println("scopes     {$popular} post with 1000+ views");
+
+User? $maybe = guard $users->byEmail('boris@example.com');
+User $byEmail = guard $maybe else { die('boris@example.com is gone'); }
+io::println("byEmail    boris@example.com is #{$byEmail->id}");
+
+// comments, then eager loading: one query per relation, however many posts
+guard $comments->leave($drafts[0], 'first!');
+guard $comments->leave($drafts[0], 'second');
+guard $comments->leave($hello, 'nice');
+$log->clear();
+array<Post> $loaded = guard $posts->find()
+    ->withAuthor()
+    ->withComments(function(CommentQuery $q) : CommentQuery {
+        return $q->oldest()->withPost();
+    })
+    ->published()
+    ->newest()
+    ->get();
+io::println("eager      {$loaded->count()} posts with authors, comments and their posts in {$log->count()} queries");
+$log->clear();
+guard $posts->load()->withAuthor()->withComments()->into($active);
+io::println("load       authors and comments of {$active->count()} posts in hand in {$log->count()} queries");
+foreach ($active as const &$p) {
+    User $author = guard $p->author->get() else { die("post #{$p->id} has no author loaded"); }
+    io::println("           \"{$p->title}\" by {$author->name}, {$p->comments->count()} comments");
+}
+
+// one UPDATE for all of Mario's posts
+uint64 $archived = guard $posts->archive($mario);
+io::println("archive    {$archived} of Mario's posts in one statement");
+
+// the second insert hits the unique email, so Carol goes too
+status<Error> $s = $db->transaction(function[$users]() : status<Error> {
+    guard $users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
+    guard $users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
+    return .ok();
+});
+uint64 $left = guard $users->count();
+io::println("rollback   duplicate: {$s->failed() && $s->failure()->duplicate()}, still {$left} users");
+
+io::println('done');

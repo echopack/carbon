@@ -1,0 +1,53 @@
+namespace blog;
+
+/**
+ * A query for posts, with the blog's scopes.
+ */
+public struct PostQuery : carbon::Query<Post, PostQuery>, PostRelations<PostQuery>
+{
+    internal PostRows $rows;
+
+    public constructor(carbon::Connection $db)
+    {
+        $this->rows = PostRows($db);
+    }
+
+    public function rows() : PostRows&
+    {
+        return $this->rows;
+    }
+
+    /**
+     * Published posts.
+     */
+    public function published() : PostQuery
+    {
+        return $this->where(PostTable::$status == Status::published);
+    }
+
+    /**
+     * Posts written by `$author`.
+     */
+    public function by(const User& $author) : PostQuery
+    {
+        return $this->where(PostTable::$authorId == $author->id);
+    }
+
+    /**
+     * Posts read at least `$views` times.
+     */
+    public function popular(int64 $views) : PostQuery
+    {
+        return $this->where(PostTable::$views >= $views);
+    }
+
+    /**
+     * Posts whose title contains `$text`. A `%` or `_` in it is a character to find, not a
+     * wildcard.
+     */
+    public function matching(const string& $text) : PostQuery
+    {
+        string $plain = str::replace(str::replace(str::replace($text, '\\', '\\\\'), '%', '\\%'), '_', '\\_');
+        return $this->where(PostTable::$title like "%{$plain}%");
+    }
+}

@@ -1,0 +1,50 @@
+namespace carbon::relation;
+
+/**
+ * Related models grouped by key, so a loader can hand each parent its share.
+ */
+public struct Index<K, T>
+{
+    internal map<K, array<T>> $groups;
+
+    public constructor()
+    {
+        $this->groups = [];
+    }
+
+    public function add(K $key, T $item) : void
+    {
+        if (!$this->groups->has($key)) {
+            array<T> $fresh = [];
+            $this->groups[$key] = $fresh;
+        }
+        $this->groups->at($key)[] = $item;
+    }
+
+    /**
+     * The first model under `$key`, null when there is none.
+     */
+    public const function first(K $key) : T?
+    {
+        if (!$this->groups->has($key)) {
+            return null;
+        }
+        const array<T>& $g = $this->groups->at($key);
+        if ($g->count() == 0) {
+            return null;
+        }
+        return $g[0];
+    }
+
+    /**
+     * Every model under `$key`, in the order they were added.
+     */
+    public const function all(K $key) : array<T>
+    {
+        if (!$this->groups->has($key)) {
+            array<T> $none = [];
+            return $none;
+        }
+        return $this->groups->get($key);
+    }
+}

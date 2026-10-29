@@ -1,0 +1,61 @@
+namespace carbon::change;
+
+use hydrahon::Value;
+
+/**
+ * A model's column values in `Schema::fields()` order, taken when it was loaded or last saved.
+ * Comparing it with a fresh one tells which columns an update has to write.
+ */
+public struct Snapshot
+{
+    public array<Value> $values = [];
+
+    /**
+     * The columns whose value differs in `$now`.
+     */
+    public const function changes(const Snapshot& $now) : Changes
+    {
+        usize $n = $now->values->count();
+        Changes $c = Changes(none: $n);
+        usize $i = 0;
+        while ($i < $n) {
+            if ($i >= $this->values->count() || !Snapshot::same($this->values[$i], $now->values[$i])) {
+                $c->mark($i);
+            }
+            $i = $i + 1;
+        }
+        return $c;
+    }
+
+    /**
+     * Whether two values are the same value of the same kind.
+     */
+    public static function same(const Value& $a, const Value& $b) : bool
+    {
+        return match ($a) {
+            Value::none => $b->isNull(),
+            Value::bool($x) => match ($b) { Value::bool($y) => $x == $y, else => false },
+            Value::int($x) => match ($b) { Value::int($y) => $x == $y, else => false },
+            Value::uint($x) => match ($b) { Value::uint($y) => $x == $y, else => false },
+            Value::float($x) => match ($b) { Value::float($y) => $x == $y, else => false },
+            Value::decimal($x) => match ($b) { Value::decimal($y) => $x->text == $y->text, else => false },
+            Value::text($x) => match ($b) { Value::text($y) => $x == $y, else => false },
+            Value::bytes($x) => match ($b) { Value::bytes($y) => $x->data == $y->data, else => false },
+            Value::date($x) => match ($b) {
+                Value::date($y) => $x->year == $y->year && $x->month == $y->month && $x->day == $y->day,
+                else => false,
+            },
+            Value::datetime($x) => match ($b) {
+                Value::datetime($y) => $x->year == $y->year && $x->month == $y->month && $x->day == $y->day
+                    && $x->hour == $y->hour && $x->minute == $y->minute && $x->second == $y->second
+                    && $x->micro == $y->micro,
+                else => false,
+            },
+            Value::time($x) => match ($b) {
+                Value::time($y) => $x->negative == $y->negative && $x->hours == $y->hours
+                    && $x->minute == $y->minute && $x->second == $y->second && $x->micro == $y->micro,
+                else => false,
+            },
+        };
+    }
+}

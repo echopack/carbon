@@ -1,0 +1,35 @@
+namespace carbon::codec;
+
+/**
+ * `map<string, string>` as a JSON object: `{"k":"a"}`, keys in sorted order so the same map
+ * always stores the same text.
+ */
+public struct JsonStringMap : carbon::Codec<map<string, string>, string>
+{
+    public const function decode(string $raw) : result<map<string, string>, carbon::Problem>
+    {
+        ordered_map<string, json::Value> $fields = guard Doc::fields($raw) else ($p) {
+            return .error($p);
+        }
+        map<string, string> $out = [];
+        foreach ($fields as $k => const &$v) {
+            string $x = guard $v->asStr() else {
+                return .error(Doc::field($k, 'a string'));
+            }
+            $out[$k] = $x;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const map<string, string>& $value) : string
+    {
+        array<string> $keys = $value->keys();
+        $keys->sort();
+        json::Value $doc = json::object();
+        foreach ($keys as const &$k) {
+            string $x = $value->get($k);
+            $doc[$k] = json::str($x);
+        }
+        return json::dump($doc);
+    }
+}

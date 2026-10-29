@@ -1,0 +1,86 @@
+namespace carbongen;
+
+/**
+ * `$type` (JSON) marked const, the way the decls pass marks the type of a `public const`
+ * field.
+ */
+internal function fixed(const string& $type) : string
+{
+    string $open = $type->sub(0, $type->size() - 1);
+    return "{$open}, \"const\": true}";
+}
+
+/**
+ * Field `$field` (JSON) as a static field.
+ */
+internal function shared(const string& $field) : string
+{
+    return str::replace($field, '"static": false', '"static": true');
+}
+
+/**
+ * The fields (JSON) of a model kept by `$repository`: its link first, then `$fields`.
+ */
+internal function fields(const string& $repository, const array<string>& $fields) : string
+{
+    array<string> $all = [link($repository)];
+    foreach ($fields as const &$f) {
+        $all[] = $f;
+    }
+    return str::join($all, ', ');
+}
+
+/**
+ * A class `$qualified` marked `#[carbon::model: '$table']` at line `$line`, kept by
+ * `$repository`, with an int64 `id` on the line after it and `$fields` after that.
+ */
+internal function model(const string& $qualified, const string& $table, int32 $line, const string& $repository, const array<string>& $fields) : string
+{
+    array<string> $all = [field('id', $line + 1, prim('int64'), '', true)];
+    foreach ($fields as const &$f) {
+        $all[] = $f;
+    }
+    return decl('class', $qualified, $line, tool('model', $table), fields($repository, $all));
+}
+
+/**
+ * An enum `$qualified` backed by `$backing` (JSON), or by nothing when `$backing` is empty.
+ */
+internal function enumeration(const string& $qualified, const string& $backing) : string
+{
+    string $b = $backing;
+    if ($b->empty()) {
+        $b = 'null';
+    }
+    return "\{\"kind\": \"enum\", \"qualified\": \"{$qualified}\", \"file\": \"src/t.eco\", \"line\": 1, \"tools\": [], \"fields\": [], \"backing\": {$b}, \"cases\": []}";
+}
+
+/**
+ * A struct `$qualified` conforming to `carbon::Codec<$from, $raw>`, both types as JSON.
+ */
+internal function codec(const string& $qualified, const string& $from, const string& $raw) : string
+{
+    return "\{\"kind\": \"struct\", \"qualified\": \"{$qualified}\", \"file\": \"src/t.eco\", \"line\": 1, \"tools\": [], \"fields\": [], \"conforms\": [\{\"kind\": \"named\", \"name\": \"carbon::Codec\", \"args\": [{$from}, {$raw}]}]}";
+}
+
+/**
+ * The problems found reading `$declarations`.
+ */
+internal function problems(const string& $declarations) : array<string>
+{
+    return Schema::read(decls($declarations))->problems;
+}
+
+/**
+ * The generated source for `$declarations`, which have to read without a problem; the
+ * problems are printed when they do not.
+ */
+internal function emitted(const string& $declarations) : string
+{
+    Schema $s = Schema::read(decls($declarations));
+    foreach ($s->problems as const &$p) {
+        echo $p;
+    }
+    assert($s->problems->count() == 0);
+    return Emitter($s)->render();
+}

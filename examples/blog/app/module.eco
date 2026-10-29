@@ -1,0 +1,19 @@
+/*
+ * blog-app: the blog example as a program, on carbon's MySQL driver.
+ *
+ * A module of its own so the blog itself never depends on the driver:
+ * drivers/mysql's live tests depend on the blog, and the other way round
+ * would be a cycle.
+ */
+
+#[module: "blog-app"]
+#[version: "0.1.0"]
+
+#[depends: ".."]
+#[depends: "../../../drivers/mysql"]
+#[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echolang/libmysql" { version: "^0.1", source: git "https://github.com/echolang/libmysql" }]
+
+#[sources: "main.eco"]
+
+#[target: exe { name: "blog", entry: "main.eco" }]

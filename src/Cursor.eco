@@ -1,0 +1,26 @@
+namespace carbon;
+
+/**
+ * Rows coming back from a query, read one at a time. The typed reads look at the current row by
+ * column position and answer null for SQL NULL and for a value of another kind; `isNull` tells
+ * the two apart.
+ */
+public interface Cursor
+{
+    /**
+     * Move to the next row. False once the rows are exhausted.
+     */
+    function step() : result<bool, Error>;
+
+    const function isNull(usize $at) : bool;
+    const function bool(usize $at) : bool?;
+    const function int(usize $at) : int64?;
+    const function uint(usize $at) : uint64?;
+    const function float(usize $at) : float64?;
+    const function text(usize $at) : string?;
+    const function decimal(usize $at) : hydrahon::Decimal?;
+    const function bytes(usize $at) : hydrahon::Bytes?;
+    const function date(usize $at) : hydrahon::Date?;
+    const function datetime(usize $at) : hydrahon::DateTime?;
+    const function time(usize $at) : hydrahon::Time?;
+}

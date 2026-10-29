@@ -1,0 +1,82 @@
+namespace carbongen;
+
+/**
+ * Renders a decls type tree back into Echo source.
+ */
+public struct Types
+{
+    /**
+     * The type as Echo source, or empty for a kind it has no spelling for here.
+     */
+    public static function render(const json::Value& $t) : string
+    {
+        string $kind = Json::text($t, 'kind');
+        if ($kind == 'string') {
+            return 'string';
+        }
+        if ($kind == 'prim') {
+            return Json::text($t, 'name');
+        }
+        if ($kind == 'optional') {
+            string $inner = Types::render(Json::field($t, 'of'));
+            return "{$inner}?";
+        }
+        if ($kind == 'array') {
+            string $of = Types::render(Json::field($t, 'of'));
+            return "array<{$of}>";
+        }
+        if ($kind == 'map') {
+            string $k = Types::render(Json::field($t, 'key'));
+            string $v = Types::render(Json::field($t, 'value'));
+            return "map<{$k}, {$v}>";
+        }
+        if ($kind == 'named') {
+            string $name = Json::text($t, 'name');
+            array<json::Value> $args = Json::items($t, 'args');
+            if ($args->count() == 0) {
+                return $name;
+            }
+            string $out = "{$name}<";
+            foreach ($args as $i => const &$a) {
+                if ($i > 0) {
+                    $out->append(', ');
+                }
+                $out->append(Types::render($a));
+            }
+            $out->append('>');
+            return $out;
+        }
+        if ($kind == 'function') {
+            string $returns = Types::render(Json::field($t, 'return'));
+            array<string> $params = [];
+            foreach (Json::items($t, 'params') as const &$p) {
+                $params[] = Types::render($p);
+            }
+            string $list = str::join($params, ', ');
+            return "function<{$returns}({$list})>";
+        }
+        if ($kind == 'ptr') {
+            string $to = Types::render(Json::field($t, 'to'));
+            if (Json::flag($t, 'weak')) {
+                return "weak<{$to}>";
+            }
+            return "ptr<{$to}>";
+        }
+        return '';
+    }
+
+    /**
+     * The `T` of a `name<T>` type, or empty when `$t` is not one.
+     */
+    public static function argument(const json::Value& $t, const string& $name) : string
+    {
+        if (Json::text($t, 'kind') != 'named' || Json::text($t, 'name') != $name) {
+            return '';
+        }
+        array<json::Value> $args = Json::items($t, 'args');
+        if ($args->count() != 1) {
+            return '';
+        }
+        return Types::render($args[0]);
+    }
+}

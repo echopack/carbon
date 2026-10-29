@@ -1,0 +1,20 @@
+namespace fixtures;
+
+/**
+ * A codec of the module's own: `Money` as its cents, refusing a negative amount.
+ */
+public struct Cents : carbon::Codec<Money, int64>
+{
+    public const function decode(int64 $raw) : result<Money, carbon::Problem>
+    {
+        if ($raw < 0) {
+            return .error(.codec('a negative amount'));
+        }
+        return .ok(Money($cents: $raw));
+    }
+
+    public const function encode(const Money& $value) : int64
+    {
+        return $value->cents;
+    }
+}

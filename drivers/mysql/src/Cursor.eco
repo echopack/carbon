@@ -1,0 +1,76 @@
+namespace carbon::mysql;
+
+/**
+ * Rows streamed from the server, read in place through libmysql's `RowView`. Dropping the
+ * cursor drains what is left, so the connection is free for the next statement.
+ */
+internal class Cursor : carbon::Cursor
+{
+    internal mysql::Rows $rows;
+
+    public function step() : result<bool, Error>
+    {
+        bool $more = guard $this->rows->step() else ($e) { return .error(Driver::failure($e)); }
+        return .ok($more);
+    }
+
+    public const function isNull(usize $at) : bool
+    {
+        return $this->rows->view()->isNull($at);
+    }
+
+    public const function bool(usize $at) : bool?
+    {
+        return $this->rows->view()->bool($at);
+    }
+
+    public const function int(usize $at) : int64?
+    {
+        return $this->rows->view()->int($at);
+    }
+
+    public const function uint(usize $at) : uint64?
+    {
+        return $this->rows->view()->uint($at);
+    }
+
+    public const function float(usize $at) : float64?
+    {
+        return $this->rows->view()->float($at);
+    }
+
+    public const function text(usize $at) : string?
+    {
+        return $this->rows->view()->text($at);
+    }
+
+    public const function decimal(usize $at) : hydrahon::Decimal?
+    {
+        string $digits = guard $this->rows->view()->text($at) else { return null; }
+        return hydrahon::Decimal($digits);
+    }
+
+    public const function bytes(usize $at) : hydrahon::Bytes?
+    {
+        string $data = guard $this->rows->view()->bytes($at) else { return null; }
+        return hydrahon::Bytes($data);
+    }
+
+    public const function date(usize $at) : hydrahon::Date?
+    {
+        mysql::Date $d = guard $this->rows->view()->date($at) else { return null; }
+        return hydrahon::Date($d->year, $d->month, $d->day);
+    }
+
+    public const function datetime(usize $at) : hydrahon::DateTime?
+    {
+        mysql::DateTime $d = guard $this->rows->view()->datetime($at) else { return null; }
+        return hydrahon::DateTime($d->year, $d->month, $d->day, $d->hour, $d->minute, $d->second, $d->micro);
+    }
+
+    public const function time(usize $at) : hydrahon::Time?
+    {
+        mysql::Time $t = guard $this->rows->view()->time($at) else { return null; }
+        return hydrahon::Time($t->negative, $t->hours, $t->minute, $t->second, $t->micro);
+    }
+}

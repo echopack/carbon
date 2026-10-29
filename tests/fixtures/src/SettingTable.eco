@@ -1,0 +1,124 @@
+/*
+ * Setting: a key the app assigns, and a schema written by hand in the shape carbongen emits,
+ * so the engine is held to the Schema contract and not to the generator.
+ */
+
+namespace fixtures;
+
+use hydrahon::{Value, DateTime, Term, Field, Values, Table};
+use carbon::{Cursor, Event, Link, Problem};
+use carbon::change::{Changes, Snapshot};
+
+public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string, SettingRepository>
+{
+    public const Term<string> $name;
+    public const Term<string> $value;
+    private Table $carbonTable;
+
+    public constructor()
+    {
+        $this->carbonTable = Table(name: 'settings');
+    }
+
+    init
+    {
+        $this->name = $this->carbonTable->column<string>('name');
+        $this->value = $this->carbonTable->column<string>('value');
+    }
+
+    public const function table() : Table
+    {
+        return $this->carbonTable;
+    }
+
+    public const function fields() : array<Field>
+    {
+        array<Field> $out = [$this->name, $this->value];
+        return $out;
+    }
+
+    public const function keyIs(string $key) : Term<bool>
+    {
+        return $this->name == $key;
+    }
+
+    public const function keyIn(const array<string>& $keys) : Term<bool>
+    {
+        return $this->name in $keys;
+    }
+
+    public const function keyAfter(string $key) : Term<bool>
+    {
+        return $this->name > $key;
+    }
+
+    public const function byKey() : hydrahon::Order
+    {
+        return $this->name->asc();
+    }
+
+    public const function keyAt() : usize
+    {
+        return 0;
+    }
+
+    public const function generated() : bool
+    {
+        return false;
+    }
+
+    public const function keyOf(const Setting& $m) : string
+    {
+        return $m->name;
+    }
+
+    public const function read(const Cursor& $row, const carbon::select::Selected& $extra) : result<Setting, carbon::Error>
+    {
+        string $name = guard $row->text(0) else { return .error(.column('name', Problem::of($row, 0))); }
+        string $value = guard $row->text(1) else { return .error(.column('value', Problem::of($row, 1))); }
+        return .ok(Setting($name: $name, $value: $value));
+    }
+
+    public const function snapshot(const Setting& $m) : Snapshot
+    {
+        return Snapshot([Value::from($m->name), Value::from($m->value)]);
+    }
+
+    public const function write(const Setting& $m, const Changes& $only, Values& $into) : void
+    {
+        if ($only->has(0)) {
+            $into[$this->name] = $m->name;
+        }
+        if ($only->has(1)) {
+            $into[$this->value] = $m->value;
+        }
+    }
+
+    public const function inserted(Setting& $m, int64 $key) : void
+    {
+    }
+
+    public const function link(Setting& $m) : Link<SettingRepository>&
+    {
+        return $m->link;
+    }
+
+    public const function stamp(Setting& $m, Event $event, DateTime $now) : void
+    {
+    }
+
+    public const function trash(Setting& $m, DateTime? $at) : bool
+    {
+        return false;
+    }
+
+    public const function trashed(const Setting& $m) : DateTime?
+    {
+        return null;
+    }
+
+    public const function live() : Term<bool>?
+    {
+        return null;
+    }
+}

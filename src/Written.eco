@@ -1,0 +1,14 @@
+namespace carbon;
+
+/**
+ * What a statement that returns no rows did.
+ */
+public struct Written
+{
+    public uint64 $affected = 0;
+
+    /**
+     * The key the database generated for the last inserted row, 0 when there is none.
+     */
+    public uint64 $insertId = 0;
+}

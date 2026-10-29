@@ -1,0 +1,19 @@
+namespace blog;
+
+public class UserRepository : carbon::Repository<User, UserQuery, int64>, UserLoading
+{
+    public carbon::Connection $db;
+
+    public function query() : UserQuery
+    {
+        return UserQuery($this->db);
+    }
+
+    /**
+     * The user with this email, null when there is none.
+     */
+    public function byEmail(const string& $email) : result<User?, carbon::Error>
+    {
+        return $this->get(UserTable::$email == $email);
+    }
+}

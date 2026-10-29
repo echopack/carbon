@@ -1,0 +1,66 @@
+namespace blog;
+
+public class PostRepository : carbon::Repository<Post, PostQuery, int64>, PostLoading
+{
+    public carbon::Connection $db;
+
+    public function query() : PostQuery
+    {
+        return PostQuery($this->db);
+    }
+
+    /**
+     * Every save trims the title; an empty one is refused.
+     */
+    public function before(carbon::Event $event, Post& $post) : status<carbon::Error>
+    {
+        if ($event->saves()) {
+            $post->title = str::trim($post->title);
+            if ($post->title->empty()) {
+                return .error(.refused('a post needs a title'));
+            }
+        }
+        return .ok();
+    }
+
+    /**
+     * Publish `$post` and save it.
+     */
+    public function publish(Post& $post) : status<carbon::Error>
+    {
+        $post->status = .published;
+        return $this->save($post);
+    }
+
+    /**
+     * Published posts, newest first.
+     */
+    public function active() : result<array<Post>, carbon::Error>
+    {
+        return $this->find()->published()->newest()->get();
+    }
+
+    /**
+     * One page of a user's published posts, newest first.
+     */
+    public function feed(const User& $author, uint64 $page) : result<array<Post>, carbon::Error>
+    {
+        return $this->find()->published()->by($author)->newest()->page($page, size: 10)->get();
+    }
+
+    /**
+     * Published posts whose title contains `$text`.
+     */
+    public function search(const string& $text) : result<array<Post>, carbon::Error>
+    {
+        return $this->find()->published()->matching($text)->get();
+    }
+
+    /**
+     * Archive every post of `$author` in one statement.
+     */
+    public function archive(const User& $author) : result<uint64, carbon::Error>
+    {
+        return $this->find()->by($author)->update([PostTable::$status => Status::archived]);
+    }
+}

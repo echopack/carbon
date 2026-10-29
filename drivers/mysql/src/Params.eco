@@ -1,0 +1,117 @@
+namespace carbon::mysql;
+
+/**
+ * Binds hydrahon's parameters as libmysql values. MySQL has no boolean type, so a bool goes
+ * over as 0 or 1.
+ */
+internal struct Params : hydrahon::Binder
+{
+    public mysql::Params $params = mysql::Params();
+
+    public static function of(const hydrahon::Params& $from) : mysql::Params
+    {
+        Params $b = Params();
+        foreach ($from as const &$v) {
+            $b->value($v);
+        }
+        return $b->params;
+    }
+
+    internal function value(const hydrahon::Value& $v) : void
+    {
+        match ($v) {
+            hydrahon::Value::none => {
+                $this->none();
+            },
+            hydrahon::Value::bool($x) => {
+                $this->bool($x);
+            },
+            hydrahon::Value::int($x) => {
+                $this->int($x);
+            },
+            hydrahon::Value::uint($x) => {
+                $this->uint($x);
+            },
+            hydrahon::Value::float($x) => {
+                $this->float($x);
+            },
+            hydrahon::Value::decimal($x) => {
+                $this->decimal($x);
+            },
+            hydrahon::Value::text($x) => {
+                $this->text($x);
+            },
+            hydrahon::Value::bytes($x) => {
+                $this->bytes($x);
+            },
+            hydrahon::Value::date($x) => {
+                $this->date($x);
+            },
+            hydrahon::Value::datetime($x) => {
+                $this->datetime($x);
+            },
+            hydrahon::Value::time($x) => {
+                $this->time($x);
+            },
+        };
+    }
+
+    public function none() : void
+    {
+        $this->params[] = mysql::Value::none;
+    }
+
+    public function bool(bool $v) : void
+    {
+        int64 $bit = 0;
+        if ($v) {
+            $bit = 1;
+        }
+        $this->params[] = mysql::Value::int($bit);
+    }
+
+    public function int(int64 $v) : void
+    {
+        $this->params[] = mysql::Value::int($v);
+    }
+
+    public function uint(uint64 $v) : void
+    {
+        $this->params[] = mysql::Value::uint($v);
+    }
+
+    public function float(float64 $v) : void
+    {
+        $this->params[] = mysql::Value::float($v);
+    }
+
+    public function decimal(const hydrahon::Decimal& $v) : void
+    {
+        $this->params[] = mysql::Value::decimal($v->text);
+    }
+
+    public function text(const string& $v) : void
+    {
+        $this->params[] = mysql::Value::text($v);
+    }
+
+    public function bytes(const hydrahon::Bytes& $v) : void
+    {
+        $this->params[] = mysql::Value::bytes($v->data);
+    }
+
+    public function date(const hydrahon::Date& $v) : void
+    {
+        $this->params[] = mysql::Value::date(mysql::Date($v->year, $v->month, $v->day));
+    }
+
+    public function datetime(const hydrahon::DateTime& $v) : void
+    {
+        $this->params[] = mysql::Value::datetime(mysql::DateTime($v->year, $v->month, $v->day, $v->hour, $v->minute, $v->second, $v->micro));
+    }
+
+    public function time(const hydrahon::Time& $v) : void
+    {
+        $this->params[] = mysql::Value::time(mysql::Time($v->negative, $v->hours, $v->minute, $v->second, $v->micro));
+    }
+}

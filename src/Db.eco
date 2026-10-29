@@ -1,0 +1,142 @@
+namespace carbon;
+
+/**
+ * An app's way into its database: the connection everything runs on, and the repositories
+ * registered on it, one per type, owned for as long as the `Db` lives. A repository is built
+ * with the connection and registered once at startup; from then on it is reached by its type.
+ *
+ * ```echo
+ * Db $db = Db($driver);
+ * $db->register(UserRepository($db->connection()));
+ * $db->register(PostRepository($db->connection(), $mailer));
+ *
+ * Post? $post = guard $db->repo<PostRepository>()->get(42);
+ * ```
+ *
+ * Repositories and queries hold the `Connection`, never the `Db`, so nothing points back at
+ * what owns them. A relation loads its models through the repository registered for them.
+ */
+public class Db
+{
+    internal Connection $connection;
+    internal map<type_id, erased> $repos = [];
+
+    public constructor(Driver $driver)
+    {
+        $this->connection = Connection($driver);
+    }
+
+    public constructor(Driver $driver, clock: Clock $clock)
+    {
+        $this->connection = Connection($driver, clock: $clock);
+    }
+
+    /**
+     * What repositories are built with: `PostRepository($db->connection())`.
+     */
+    public function connection() : Connection
+    {
+        return $this->connection;
+    }
+
+    /**
+     * Keep `$repo` as the repository of its type and make it the one its models link to.
+     * Registering a second repository of one type is a wiring bug, and stops the program in
+     * every build.
+     */
+    public function register<R : class>(R $repo) : void
+    {
+        type_id $id = type_id<R>();
+        if ($this->repos->has($id)) {
+            die('carbon: a repository of this type is already registered on this Db');
+        }
+        $repo->adopt();
+        $this->repos[$id] = erased::from(Held<R>($repo));
+    }
+
+    /**
+     * The repository registered for type `R`. Asking for one that never was is a wiring bug,
+     * and stops the program in every build; `has<R>()` asks first.
+     */
+    public function repo<R : class>() : R
+    {
+        type_id $id = type_id<R>();
+        if (!$this->repos->has($id)) {
+            die('carbon: no repository of this type is registered on this Db');
+        }
+        erased $held = $this->repos->get($id);
+        Held<R> $entry;
+        // sound: only register writes the key, always with this type
+        unsafe {
+            $entry = assume<Held<R>>($held);
+        }
+        return $entry->value;
+    }
+
+    /**
+     * Whether a repository of type `R` is registered.
+     */
+    public const function has<R : class>() : bool
+    {
+        return $this->repos->has(type_id<R>());
+    }
+
+    /**
+     * Name a database (schema) the app reaches besides the connection's own; see
+     * `Connection::schema`.
+     */
+    public function schema(const string& $name, const string& $actual) : void
+    {
+        $this->connection->schema($name, $actual);
+    }
+
+    /**
+     * The database named `$name`, null when none was given.
+     */
+    public const function schema(const string& $name) : string?
+    {
+        return $this->connection->schema($name);
+    }
+
+    /**
+     * Tell `$listener` about every statement from now on.
+     */
+    public function listen(Listener $listener) : void
+    {
+        $this->connection->listen($listener);
+    }
+
+    /**
+     * Run `$work` in a transaction: commit when it succeeds, roll back when it fails and hand
+     * back its error. Transactions do not nest.
+     */
+    public function transaction(function<status<Error>()> $work) : status<Error>
+    {
+        return $this->connection->transaction($work);
+    }
+
+    /**
+     * Run `$work` in a transaction and hand back what it made: committed when it succeeds,
+     * rolled back when it fails.
+     */
+    public function transaction<T>(function<result<T, Error>()> $work) : result<T, Error>
+    {
+        return $this->connection->produce<T>($work);
+    }
+
+    /**
+     * Run `$sql` as it is, without parameters: DDL, migrations, anything carbon does not build.
+     */
+    public function run(const string& $sql) : result<Written, Error>
+    {
+        return $this->connection->run($sql);
+    }
+
+    /**
+     * Whether a transaction is open.
+     */
+    public const function inTransaction() : bool
+    {
+        return $this->connection->inTransaction();
+    }
+}

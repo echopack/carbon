@@ -1,0 +1,37 @@
+namespace fixtures;
+
+/**
+ * A column through each codec carbon brings, two of them nullable, and one through a codec of
+ * this module that stores a number.
+ */
+#[carbon::model: 'profiles']
+public class Profile : carbon::Model<Profile, ProfileRepository>
+{
+    public carbon::Link<ProfileRepository> $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+
+    #[carbon::codec: 'json']
+    public json::Value $data = json::object();
+
+    #[carbon::codec: 'json']
+    public json::Value? $extra = null;
+
+    #[carbon::codec: 'json']
+    public map<string, int64> $counts = [];
+
+    #[carbon::codec: 'csv']
+    public array<string> $tags = [];
+
+    #[carbon::codec: 'lines']
+    public array<string>? $steps = null;
+
+    #[carbon::codec: 'Cents']
+    public Money $price = Money($cents: 0);
+
+    public function link() : carbon::Link<ProfileRepository>&
+    {
+        return $this->link;
+    }
+}

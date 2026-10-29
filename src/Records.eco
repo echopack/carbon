@@ -1,0 +1,17 @@
+namespace carbon;
+
+/**
+ * The repository of a model that needs nothing of its own: its connection and a query. carbongen
+ * names it for a model whose repository the module does not declare:
+ * `public type TagRepository = carbon::Records<Tag, TagQuery, int64>;`, registered like any
+ * other, `$db->register(TagRepository($db->connection()))`.
+ */
+public class Records<M, Q, K> : Repository<M, Q, K>
+{
+    public Connection $db;
+
+    public function query() : Q
+    {
+        return Q($this->db);
+    }
+}

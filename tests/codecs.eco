@@ -1,0 +1,198 @@
+use carbon::Problem;
+use carbon::codec::{Json, JsonStrings, JsonInts, JsonFloats, JsonBools, JsonStringMap, JsonIntMap, JsonFloatMap, JsonBoolMap, Csv, Lines};
+
+/**
+ * The reason a codec gave for refusing `$raw`, or empty when it took it.
+ */
+function refused(const result<array<string>, Problem>& $r) : string
+{
+    match ($r) {
+        .ok($v) => {
+            return '';
+        },
+        .error($p) => {
+            return str::from($p);
+        },
+    }
+}
+
+function csvBack(const array<string>& $items) : array<string>
+{
+    string $text = Csv()->encode($items);
+    array<string> $back = guard Csv()->decode($text) else { die("csv refused its own {$text}"); }
+    return $back;
+}
+
+function linesBack(const array<string>& $items) : array<string>
+{
+    string $text = Lines()->encode($items);
+    array<string> $back = guard Lines()->decode($text) else { die('lines refused its own text'); }
+    return $back;
+}
+
+function same(const array<string>& $a, const array<string>& $b) : bool
+{
+    if ($a->count() != $b->count()) {
+        return false;
+    }
+    foreach ($a as $i => const &$x) {
+        if ($x != $b[$i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+test json_round_trips_any_document
+{
+    json::Value $doc = json::object();
+    $doc['name'] = 'carbon';
+    $doc['tags'] = json::arr();
+    $doc['tags'][] = 'orm';
+    $doc['n'] = json::nil();
+    string $text = Json()->encode($doc);
+    assert($text == '{"name":"carbon","tags":["orm"],"n":null}');
+    json::Value $back = guard Json()->decode($text) else { die('refused'); };
+    assert(($back['tags'][0]->asStr() ?? '') == 'orm');
+    assert($back['n']->isNull());
+    // a JSON null is a value, not a missing one
+    json::Value $nil = guard Json()->decode('null') else { die('refused'); };
+    assert($nil->isNull());
+    // the text a server hands back may be spaced
+    json::Value $spaced = guard Json()->decode('{"a": 1, "b": [true, false]}') else { die('refused'); };
+    assert(Json()->encode($spaced) == '{"a":1,"b":[true,false]}');
+}
+
+test json_refuses_text_that_is_not_json
+{
+    result<json::Value, Problem> $r = Json()->decode('{"a":');
+    match ($r) {
+        .ok($v) => {
+            assert(false);
+        },
+        .error($p) => {
+            assert(str::from($p)->starts('was refused by its codec: not json: '));
+        },
+    }
+}
+
+test json_lists_check_every_item
+{
+    array<string> $s = ['a', 'b"c'];
+    // the dump escapes the quote: ["a","b\"c"]
+    string $text = JsonStrings()->encode($s);
+    assert($text == "[\"a\",\"b\\\"c\"]");
+    array<string> $sb = guard JsonStrings()->decode($text) else { die('refused'); };
+    assert(same($sb, $s));
+    assert(refused(JsonStrings()->decode('["a",2]')) == 'was refused by its codec: item 1 is not a string');
+    assert(refused(JsonStrings()->decode('{"a":1}')) == 'was refused by its codec: not a json array');
+
+    array<int64> $i = [1, -2, 9223372036854775807];
+    assert(JsonInts()->encode($i) == '[1,-2,9223372036854775807]');
+    array<int64> $ib = guard JsonInts()->decode('[1,-2,9223372036854775807]') else { die('refused'); };
+    assert($ib->count() == 3 && $ib[2] == 9223372036854775807);
+    match (JsonInts()->decode('[1,1.5]')) {
+        .ok($v) => { assert(false); },
+        .error($p) => { assert(str::from($p) == 'was refused by its codec: item 1 is not an integer'); },
+    }
+
+    array<float64> $f = guard JsonFloats()->decode('[1,2.5]') else { die('refused'); };
+    assert($f[0] == 1.0 && $f[1] == 2.5);
+    assert(JsonFloats()->encode($f) == '[1.0,2.5]');
+
+    array<bool> $b = [true, false];
+    assert(JsonBools()->encode($b) == '[true,false]');
+    array<bool> $bb = guard JsonBools()->decode('[true,false]') else { die('refused'); };
+    assert($bb->count() == 2 && $bb[0] && !$bb[1]);
+    array<bool> $none = guard JsonBools()->decode('[]') else { die('refused'); };
+    assert($none->count() == 0);
+}
+
+test json_maps_store_sorted_keys
+{
+    map<string, string> $m = map<string, string>();
+    $m['zeta'] = 'z';
+    $m['alpha'] = 'a';
+    $m['mid'] = 'm';
+    assert(JsonStringMap()->encode($m) == '{"alpha":"a","mid":"m","zeta":"z"}');
+    map<string, string> $back = guard JsonStringMap()->decode('{"b":"2","a":"1"}') else { die('refused'); };
+    assert($back->count() == 2 && $back['a'] == '1' && $back['b'] == '2');
+    match (JsonStringMap()->decode('{"a":1}')) {
+        .ok($v) => { assert(false); },
+        .error($p) => { assert(str::from($p) == 'was refused by its codec: field a is not a string'); },
+    }
+    match (JsonStringMap()->decode('[1]')) {
+        .ok($v) => { assert(false); },
+        .error($p) => { assert(str::from($p) == 'was refused by its codec: not a json object'); },
+    }
+
+    map<string, int64> $counts = map<string, int64>();
+    $counts['views'] = 3;
+    $counts['likes'] = 1;
+    assert(JsonIntMap()->encode($counts) == '{"likes":1,"views":3}');
+    map<string, int64> $cb = guard JsonIntMap()->decode('{"views":3}') else { die('refused'); };
+    assert($cb['views'] == 3);
+
+    map<string, float64> $fb = guard JsonFloatMap()->decode('{"x":1,"y":0.5}') else { die('refused'); };
+    assert($fb['x'] == 1.0 && $fb['y'] == 0.5);
+    assert(JsonFloatMap()->encode($fb) == '{"x":1.0,"y":0.5}');
+
+    map<string, bool> $flags = guard JsonBoolMap()->decode('{"on":true,"off":false}') else { die('refused'); };
+    assert($flags['on'] && !$flags['off']);
+    assert(JsonBoolMap()->encode($flags) == '{"off":false,"on":true}');
+}
+
+test csv_writes_one_record
+{
+    array<string> $none = [];
+    assert(Csv()->encode($none) == '');
+    array<string> $one = [''];
+    assert(Csv()->encode($one) == '""');
+    array<string> $plain = ['echo', 'orm'];
+    assert(Csv()->encode($plain) == 'echo,orm');
+    array<string> $odd = ['a,b', 'say "hi"', "two\nlines", ''];
+    assert(Csv()->encode($odd) == "\"a,b\",\"say \"\"hi\"\"\",\"two\nlines\",");
+}
+
+test csv_reads_back_what_it_wrote
+{
+    array<array<string>> $cases = [
+        [],
+        [''],
+        ['', ''],
+        ['a', ''],
+        ['', 'a'],
+        ['echo', 'orm', 'sql'],
+        ['a,b', 'say "hi"', "two\r\nlines", '"'],
+        ['""', ','],
+    ];
+    foreach ($cases as const &$c) {
+        assert(same(csvBack($c), $c));
+    }
+}
+
+test csv_refuses_broken_quotes
+{
+    assert(refused(Csv()->decode('"open')) == 'was refused by its codec: a quote is never closed');
+    assert(refused(Csv()->decode('"a"b')) == 'was refused by its codec: text after a closing quote');
+    assert(refused(Csv()->decode('a"b')) == 'was refused by its codec: a quote inside an unquoted item');
+    array<string> $quoted = guard Csv()->decode('"a",b') else { die('refused'); };
+    assert($quoted->count() == 2 && $quoted[0] == 'a' && $quoted[1] == 'b');
+}
+
+test lines_end_every_item_in_a_newline
+{
+    array<string> $none = [];
+    assert(Lines()->encode($none) == '');
+    array<string> $one = [''];
+    assert(Lines()->encode($one) == "\n");
+    array<string> $two = ['first', 'second'];
+    assert(Lines()->encode($two) == "first\nsecond\n");
+    array<array<string>> $cases = [[], [''], ['', ''], ['a', ''], ['first', 'second']];
+    foreach ($cases as const &$c) {
+        assert(same(linesBack($c), $c));
+    }
+    // what other writers leave behind
+    array<string> $loose = guard Lines()->decode("a\r\nb") else { die('refused'); };
+    assert($loose->count() == 2 && $loose[0] == 'a' && $loose[1] == 'b');
+}

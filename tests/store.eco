@@ -1,0 +1,441 @@
+use carbon::{Error, Event, Db};
+use carbon::fake;
+use hydrahon::{Value, DateTime, Postgres};
+use fixtures::{World, Note, Tag, Setting, Mood, NoteRepository, Trail, noteRow, tagRow, failure, message, selectNotes};
+
+test find_loads_a_linked_model
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'Hello', true, .happy)]);
+    Note? $found = guard $w->notes->get(1);
+    Note $n = guard $found;
+    assert($n->id == 1);
+    assert($n->title == 'Hello');
+    assert($n->pinned);
+    assert($n->mood == Mood::happy);
+    assert($n->body == null);
+    assert($n->link->persisted());
+    assert($n->link->attached());
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` = ? AND `notes`.`deleted_at` IS NULL LIMIT 1'));
+    assert($w->fake->sent(0, [Value::from(1)]));
+}
+
+test find_nothing_is_null_and_one_is_missing
+{
+    $w = World();
+    $w->fake->rows([])->rows([]);
+    Note? $found = guard $w->notes->get(5);
+    assert($found == null);
+    result<Note, Error> $one = $w->notes->find()->one(5);
+    assert($one->failed());
+    assert(str::from($one->failure()) == 'no matching row');
+}
+
+test many_without_keys_runs_no_query
+{
+    $w = World();
+    array<int64> $none = [];
+    array<Note> $found = guard $w->notes->many($none);
+    assert($found->count() == 0);
+    assert($w->fake->count() == 0);
+}
+
+test many_uses_one_in_list
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    array<Note> $found = guard $w->notes->many([1, 2]);
+    assert($found->count() == 2);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?, ?) AND `notes`.`deleted_at` IS NULL'));
+}
+
+test reading_refuses_bad_columns
+{
+    $w = World();
+    array<Value> $nullTitle = noteRow(1, 'x');
+    $nullTitle[1] = Value::none;
+    array<Value> $wrongKind = noteRow(1, 'x');
+    $wrongKind[0] = Value::from('one');
+    array<Value> $noCase = noteRow(1, 'x');
+    $noCase[3] = Value::from(9);
+    array<Value> $tooWide = noteRow(1, 'x');
+    $tooWide[3] = Value::from(300);
+    $w->fake->rows([$nullTitle])->rows([$wrongKind])->rows([$noCase])->rows([$tooWide]);
+    result<array<Note>, Error> $a = $w->notes->all();
+    assert(str::from($a->failure()) == 'column title is NULL but the field is not nullable');
+    result<array<Note>, Error> $b = $w->notes->all();
+    assert(str::from($b->failure()) == 'column id holds another kind of value than the field');
+    result<array<Note>, Error> $c = $w->notes->all();
+    assert(str::from($c->failure()) == 'column mood matches no enum case');
+    result<array<Note>, Error> $d = $w->notes->all();
+    assert(str::from($d->failure()) == 'column mood does not fit the field');
+}
+
+test create_inserts_stamps_and_takes_the_last_insert_id
+{
+    $w = World();
+    $w->fake->written($insertId: 41);
+    Note $n = guard $w->notes->create(Note($title: 'New', $mood: .grumpy));
+    assert($n->id == 41);
+    assert($n->link->persisted());
+    DateTime $at = guard $n->createdAt;
+    assert($at->year == 2023 && $at->month == 11 && $at->day == 14 && $at->hour == 22);
+    assert($n->updatedAt != null);
+    assert($w->fake->last() == 'INSERT INTO `notes` (`title`, `pinned`, `mood`, `body`, `created_at`, `updated_at`, `deleted_at`) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    assert($w->fake->sent(0, [Value::from('New'), Value::from(false), Value::from(2), Value::none, Value::from($at), Value::from($at), Value::none]));
+}
+
+test create_reads_the_key_through_returning_on_postgres
+{
+    $fake = fake::Driver<Postgres>();
+    $fake->rows([[Value::from(77)]]);
+    Db $db = Db($fake);
+    $db->register(NoteRepository($db->connection()));
+    Note $n = guard $db->repo<NoteRepository>()->create(Note($title: 'Pg'));
+    assert($n->id == 77);
+    assert($fake->last() == 'INSERT INTO "notes" ("title", "pinned", "mood", "body", "created_at", "updated_at", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id"');
+}
+
+test an_assigned_key_is_written_and_kept
+{
+    $w = World();
+    $w->fake->written(1)->written(1);
+    Setting $s = guard $w->settings->create(Setting($name: 'theme', $value: 'dark'));
+    assert($w->fake->last() == 'INSERT INTO `settings` (`name`, `value`) VALUES (?, ?)');
+    $s->value = 'light';
+    guard $s->save();
+    assert($w->fake->last() == 'UPDATE `settings` SET `value` = ? WHERE `settings`.`name` = ?');
+    assert($w->fake->sent(1, [Value::from('light'), Value::from('theme')]));
+}
+
+test save_writes_only_what_changed
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Before')])->written(1);
+    Note $n = guard $w->notes->find()->one(3);
+    assert(!$n->dirty());
+    $n->title = 'After';
+    assert($n->dirty());
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+    assert(!$w->notes->dirty($n));
+}
+
+test save_on_a_clean_model_runs_no_query
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Same')]);
+    Note $n = guard $w->notes->find()->one(3);
+    guard $n->save();
+    $n->title = 'Same';
+    guard $n->save();
+    assert($w->fake->count() == 1);
+}
+
+test a_hand_built_model_is_detached_until_attached
+{
+    $w = World();
+    Note $n = Note($title: 'Loose');
+    status<Error> $s = $n->save();
+    assert(message($s) == 'the model is not linked to a live repository');
+    assert($w->fake->count() == 0);
+
+    $w->fake->written($insertId: 5);
+    $w->notes->attach($n);
+    guard $n->save();
+    assert($n->id == 5);
+    assert($n->link->persisted());
+}
+
+/**
+ * A note loaded through a Db, and so a repository, that is gone once this returns.
+ */
+function orphan(fake::Driver<hydrahon::Mysql> $fake) : Note
+{
+    Db $db = Db($fake);
+    $db->register(NoteRepository($db->connection()));
+    Note $n = guard $db->repo<NoteRepository>()->find()->one(1);
+    assert($n->link->attached());
+    return $n;
+}
+
+test a_model_outlives_its_repository_safely
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows([noteRow(1, 'Orphan')]);
+    Note $n = orphan($fake);
+    assert(!$n->link->attached());
+    $n->title = 'Changed';
+    status<Error> $s = $n->save();
+    assert(message($s) == 'the model is not linked to a live repository');
+    assert($fake->count() == 1);
+}
+
+test a_changed_key_is_refused
+{
+    $w = World();
+    $w->fake->written(1);
+    Setting $s = guard $w->settings->create(Setting($name: 'a', $value: 'x'));
+    $s->name = 'b';
+    $s->value = 'y';
+    status<Error> $saved = $s->save();
+    assert(message($saved) == 'the key changed since the model was loaded');
+    status<Error> $purged = $w->settings->purge($s);
+    assert(message($purged) == 'the key changed since the model was loaded');
+    // nothing ran against row a or row b
+    assert($w->fake->count() == 1);
+    // putting the key back makes it an ordinary update of row a
+    $w->fake->written(1);
+    $s->name = 'a';
+    guard $s->save();
+    assert($w->fake->last() == 'UPDATE `settings` SET `value` = ? WHERE `settings`.`name` = ?');
+    assert($w->fake->sent(1, [Value::from('y'), Value::from('a')]));
+}
+
+test create_refuses_a_stored_model
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Kept')]);
+    Note $n = guard $w->notes->find()->one(3);
+    result<Note, Error> $copy = $w->notes->create($n);
+    assert(str::from($copy->failure()) == 'the model is already stored; save it instead');
+    assert($n->id == 3);
+    assert($w->fake->count() == 1);
+}
+
+test a_registered_repository_is_reached_by_its_type
+{
+    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    assert(!$db->has<NoteRepository>());
+    $db->register(NoteRepository($db->connection()));
+    assert($db->has<NoteRepository>());
+    NoteRepository $a = $db->repo<NoteRepository>();
+    NoteRepository $b = $db->repo<NoteRepository>();
+    // one repository, shared: what one caller sets, the other sees
+    $a->pinnedOnly = true;
+    assert($b->pinnedOnly);
+    assert($a->connection() == $db->connection());
+}
+
+/**
+ * Adopt notes on `$c` with a repository that is gone once this returns.
+ */
+function adoptAndDrop(carbon::Connection $c) : void
+{
+    NoteRepository $first = NoteRepository($c);
+    $first->adopt();
+}
+
+test a_new_repository_adopts_once_the_old_one_is_gone
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    carbon::Connection $c = carbon::Connection($fake);
+    adoptAndDrop($c);
+    NoteRepository $second = NoteRepository($c);
+    $second->adopt();
+    $fake->rows([noteRow(1, 'Again')]);
+    Note $n = guard $second->find()->one(1);
+    assert($n->link->attached());
+}
+
+/**
+ * Two live note repositories adopting on one connection.
+ */
+function adoptTwice() : void
+{
+    carbon::Connection $c = carbon::Connection(fake::Driver<hydrahon::Mysql>());
+    NoteRepository $a = NoteRepository($c);
+    $a->adopt();
+    NoteRepository $b = NoteRepository($c);
+    $b->adopt();
+}
+
+#[tests: expects death]
+test two_live_repositories_for_one_model_stop
+{
+    adoptTwice();
+}
+
+/**
+ * Register two note repositories on one Db.
+ */
+function registerTwice() : void
+{
+    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    $db->register(NoteRepository($db->connection()));
+    $db->register(NoteRepository($db->connection()));
+}
+
+#[tests: expects death]
+test registering_a_type_twice_stops
+{
+    registerTwice();
+}
+
+/**
+ * Ask a Db for a repository nobody registered.
+ */
+function askUnregistered() : void
+{
+    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    NoteRepository $none = $db->repo<NoteRepository>();
+}
+
+#[tests: expects death]
+test asking_for_an_unregistered_repository_stops
+{
+    askUnregistered();
+}
+
+test delete_is_soft_and_restore_brings_it_back
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'Bin')])->written(1)->written(1);
+    Note $n = guard $w->notes->find()->one(4);
+    $w->clock->advance(60);
+    guard $n->delete();
+    assert($n->deletedAt != null);
+    assert($w->fake->last() == 'UPDATE `notes` SET `updated_at` = ?, `deleted_at` = ? WHERE `notes`.`id` = ?');
+    guard $n->restore();
+    assert($n->deletedAt == null);
+    assert($w->fake->last() == 'UPDATE `notes` SET `deleted_at` = ? WHERE `notes`.`id` = ?');
+    assert($w->fake->sent(2, [Value::none, Value::from(4)]));
+}
+
+test purge_removes_the_row
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'Gone')])->written(1);
+    Note $n = guard $w->notes->find()->one(4);
+    guard $n->purge();
+    assert(!$n->persisted());
+    assert($w->fake->last() == 'DELETE FROM `notes` WHERE `notes`.`id` = ?');
+    status<Error> $again = $w->notes->purge($n);
+    assert(message($again) == 'no matching row');
+}
+
+test delete_without_a_soft_delete_column_is_hard
+{
+    $w = World();
+    $w->fake->rows([tagRow(8, 1, 'red')])->written(1);
+    Tag $t = guard $w->tags->find()->one(8);
+    guard $t->delete();
+    assert($w->fake->last() == 'DELETE FROM `tags` WHERE `tags`.`id` = ?');
+}
+
+test fresh_sees_soft_deleted_rows
+{
+    $w = World();
+    $w->fake->rows([noteRow(6, 'Old')])->rows([noteRow(6, 'New')]);
+    Note $n = guard $w->notes->find()->one(6);
+    Note $f = guard $n->fresh();
+    assert($f->title == 'New');
+    assert($n->title == 'Old');
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` = ? LIMIT 1'));
+}
+
+test a_failed_insert_leaves_the_model_unsaved
+{
+    $w = World();
+    $w->fake->fails(failure(.duplicate));
+    Note $n = Note($title: 'Dup');
+    $w->notes->attach($n);
+    status<Error> $s = $n->save();
+    assert($s->failed());
+    assert($s->failure()->duplicate());
+    assert(!$n->link->persisted());
+}
+
+/**
+ * Notes what it hears in the repository's trail; refuses grumpy notes, fills an empty body on
+ * create.
+ */
+class Watcher : carbon::Observer<Note>
+{
+    public Trail $trail;
+
+    public function before(Event $event, Note& $model) : status<Error>
+    {
+        $this->trail->heard[] = "observer before {$event->value()}";
+        if ($model->mood == Mood::grumpy) {
+            return .error(.refused('too grumpy'));
+        }
+        if ($event == Event::creating && $model->body == null) {
+            $model->body = 'filled';
+        }
+        return .ok();
+    }
+
+    public function after(Event $event, const Note& $model) : void
+    {
+        $this->trail->heard[] = "observer after {$event->value()}";
+    }
+}
+
+test hooks_run_inside_out_and_can_refuse
+{
+    $w = World();
+    $w->notes->observe(Watcher($w->notes->trail));
+    $w->fake->written($insertId: 1)->written(1);
+    Note $n = guard $w->notes->create(Note($title: 'Watched'));
+    assert(($n->body ?? '') == 'filled');
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | observer before 0 | observer after 0 | repo after 0');
+    $w->notes->trail->heard->clear();
+    $n->title = 'Edited';
+    guard $n->save();
+    $n->mood = .grumpy;
+    status<Error> $s = $n->save();
+    assert(message($s) == 'refused: too grumpy');
+    assert($w->fake->count() == 2);
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 1 | observer before 1 | observer after 1 | repo after 1 | repo before 1 | observer before 1');
+}
+
+test the_repository_hook_changes_and_refuses_models
+{
+    $w = World();
+    $w->fake->written($insertId: 1);
+    Note $n = guard $w->notes->create(Note($title: '  Padded  '));
+    assert($n->title == 'Padded');
+    DateTime $at = guard $n->createdAt;
+    assert($w->fake->sent(0, [Value::from('Padded'), Value::from(false), Value::from(0), Value::none, Value::from($at), Value::from($at), Value::none]));
+    result<Note, Error> $empty = $w->notes->create(Note($title: '   '));
+    assert($empty->failed());
+    assert(str::from($empty->failure()) == 'refused: a note needs a title');
+    assert($w->fake->count() == 1);
+}
+
+test a_model_and_its_repository_save_through_the_same_hooks
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Same')])->written(1)->written(1);
+    Note $n = guard $w->notes->find()->one(3);
+    $n->title = ' One ';
+    guard $n->save();
+    $n->title = ' Two ';
+    guard $w->notes->save($n);
+    assert($n->title == 'Two');
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 1 | repo after 1 | repo before 1 | repo after 1');
+    // a soft delete and a restore are heard too
+    $w->fake->written(1)->written(1);
+    $w->notes->trail->heard->clear();
+    guard $n->delete();
+    guard $n->restore();
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 2 | repo after 2 | repo before 3 | repo after 3');
+}
+
+/**
+ * Reads a tag on a database where no tag repository adopted the model.
+ */
+function unadopted() : void
+{
+    carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
+    $fake->rows([tagRow(1, 1, 'x')]);
+    fixtures::TagQuery $q = fixtures::TagQuery(carbon::Connection($fake));
+    guard $q->get();
+}
+
+#[tests: expects death]
+test a_model_read_without_an_adopting_repository_stops
+{
+    unadopted();
+}

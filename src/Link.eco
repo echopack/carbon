@@ -1,0 +1,56 @@
+namespace carbon;
+
+use carbon::change::Snapshot;
+
+/**
+ * A model's tie to the repository that adopted it: a weak reference (models never keep their
+ * repository alive), whether the row exists, and the column values as last loaded or saved. A
+ * model built by hand starts `detached()`; it is linked when it is loaded, created or attached.
+ *
+ * `R` is the model's `Repository`; the defaults of `carbon::Model` reach it through `repo()`, so
+ * `$post->save()` runs the repository's hooks like `$posts->save($post)` does.
+ */
+public struct Link<R>
+{
+    internal weak<R> $repo;
+    internal bool $persisted;
+    internal Snapshot $original;
+
+    public constructor()
+    {
+        $this->repo = null;
+        $this->persisted = false;
+        $this->original = Snapshot();
+    }
+
+    public static function detached() : Link<R>
+    {
+        return Link<R>();
+    }
+
+    /**
+     * The repository, while it is alive.
+     */
+    public const function repo() : result<R, Error>
+    {
+        R $r = guard strong($this->repo) else { return .error(.detached); }
+        return .ok($r);
+    }
+
+    /**
+     * Whether the repository is still alive.
+     */
+    public const function attached() : bool
+    {
+        R? $r = strong($this->repo);
+        return $r != null;
+    }
+
+    /**
+     * Whether the row exists in the database.
+     */
+    public const function persisted() : bool
+    {
+        return $this->persisted;
+    }
+}

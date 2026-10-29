@@ -1,0 +1,19 @@
+namespace blog;
+
+public class CommentRepository : carbon::Repository<Comment, CommentQuery, int64>, CommentLoading
+{
+    public carbon::Connection $db;
+
+    public function query() : CommentQuery
+    {
+        return CommentQuery($this->db);
+    }
+
+    /**
+     * Leave a comment on `$post`.
+     */
+    public function leave(const Post& $post, const string& $body) : result<Comment, carbon::Error>
+    {
+        return $this->create(Comment($postId: $post->id, $body: $body));
+    }
+}

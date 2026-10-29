@@ -1,0 +1,9 @@
+namespace fixtures;
+
+/**
+ * An amount in cents, never negative.
+ */
+public struct Money
+{
+    public int64 $cents;
+}

@@ -1,0 +1,650 @@
+use carbon::{Db, Connection, Error, Event, Fault, Failure, Problem, Statement, Written, Traits};
+use carbon::change::{Changes, Snapshot};
+use carbon::listen::Log;
+use carbon::select::{Selected, Pick};
+use carbon::fake;
+use hydrahon::{Value, DateTime, Date, Time, Bytes, Decimal, Mysql};
+use fixtures::{World, Note, Tag, Setting, NoteQuery, NoteTable, TagTable, SettingTable, NoteCountTable, noteRow, tagRow, failure, message, selectNotes, selectTags};
+
+test every_error_reads_well
+{
+    Error $detached = .detached;
+    assert(str::from($detached) == 'the model is not linked to a live repository');
+    Error $nested = .nested;
+    assert(str::from($nested) == 'a transaction is already open');
+    Error $invalid = .invalid('bad filter');
+    assert(str::from($invalid) == 'invalid: bad filter');
+    Error $rekeyed = .rekeyed;
+    assert(str::from($rekeyed) == 'the key changed since the model was loaded');
+    Error $persisted = .persisted;
+    assert(str::from($persisted) == 'the model is already stored; save it instead');
+    Error $range = .column('n', .range);
+    assert(str::from($range) == 'column n does not fit the field');
+    Error $unknown = .column('mood', .unknown);
+    assert(str::from($unknown) == 'column mood matches no enum case');
+    Error $codec = .column('when', .codec('not a date'));
+    assert(str::from($codec) == 'column when was refused by its codec: not a date');
+    Error $mismatch = .column('id', .mismatch);
+    assert(str::from($mismatch) == 'column id holds another kind of value than the field');
+    // only a driver failure has a fault of its own
+    assert($invalid->fault() == Fault::other);
+    assert(!$nested->retryable());
+    Error $ref = .driver(Failure(.reference, 'gone'));
+    assert($ref->fault() == Fault::reference);
+    assert(!$ref->duplicate());
+}
+
+test a_problem_tells_null_from_another_kind
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->rows([[Value::none, Value::from('x')]]);
+    Db $db = Db($fake);
+    carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
+    guard $c->step();
+    assert(str::from(Problem::of($c, 0)) == 'is NULL but the field is not nullable');
+    assert(str::from(Problem::of($c, 1)) == 'holds another kind of value than the field');
+}
+
+test the_fake_reads_every_kind
+{
+    $fake = fake::Driver<Mysql>();
+    DateTime $at = DateTime(2024, 2, 29, 23, 59, 58, 7);
+    $fake->rows([[
+        Value::uint(8),
+        Value::from('t'),
+        Value::from(Decimal('9.99')),
+        Value::from(Bytes('raw')),
+        Value::from(Date(2024, 2, 29)),
+        Value::from($at),
+        Value::from(Time(true, 838, 59, 58, 1)),
+        Value::from(false),
+    ]]);
+    Db $db = Db($fake);
+    carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
+    // before the first step there is no row to read
+    assert($c->isNull(0));
+    assert($c->text(1) == null);
+    guard $c->step();
+    assert(($c->uint(0) ?? 0) == 8);
+    assert($c->bool(0) ?? false);
+    assert($c->int(0) == null);
+    assert(($c->text(1) ?? '') == 't');
+    Decimal $d = guard $c->decimal(2);
+    assert($d->text == '9.99');
+    Bytes $b = guard $c->bytes(3);
+    assert($b->data == 'raw');
+    Date $day = guard $c->date(4);
+    assert($day->year == 2024 && $day->month == 2 && $day->day == 29);
+    DateTime $dt = guard $c->datetime(5);
+    assert($dt->micro == 7 && $dt->second == 58);
+    Time $t = guard $c->time(6);
+    assert($t->negative && $t->hours == 838 && $t->micro == 1);
+    // a boolean reads as an integer the way MySQL sends one
+    assert(($c->int(7) ?? 9) == 0);
+    // a value of another kind is null, never a conversion
+    assert($c->float(1) == null);
+    assert($c->decimal(1) == null);
+    assert($c->bytes(1) == null);
+    assert($c->date(5) == null);
+    assert($c->datetime(4) == null);
+    assert($c->time(5) == null);
+    assert($c->uint(1) == null);
+    assert($c->bool(1) == null);
+}
+
+test the_fake_knows_its_dialect
+{
+    fake::Driver<Mysql> $my = fake::Driver<Mysql>();
+    assert(!$my->traits()->returning);
+    fake::Driver<hydrahon::Postgres> $pg = fake::Driver<hydrahon::Postgres>();
+    assert($pg->traits()->returning);
+    assert($my->last() == '');
+    assert($my->pending() == 0);
+    $my->rows([])->written();
+    assert($my->pending() == 2);
+}
+
+test sent_compares_count_and_kind
+{
+    $w = World();
+    $w->fake->rows([]);
+    guard $w->notes->get(3);
+    assert($w->fake->sent(0, [Value::from(3)]));
+    assert(!$w->fake->sent(0, [Value::uint(3)]));
+    assert(!$w->fake->sent(0, [Value::from(3), Value::from(3)]));
+    array<Value> $none = [];
+    assert(!$w->fake->sent(0, $none));
+    assert($w->fake->params(0)->count() == 1);
+}
+
+/**
+ * Answer a query with a write answer queued.
+ */
+function rowsExpected() : void
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->written();
+    Db $db = Db($fake);
+    guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
+}
+
+#[tests: expects death]
+test the_fake_stops_at_a_write_answer_for_a_query
+{
+    rowsExpected();
+}
+
+/**
+ * Answer a write with rows queued.
+ */
+function writeExpected() : void
+{
+    $fake = fake::Driver<Mysql>();
+    $fake->rows([]);
+    Db $db = Db($fake);
+    guard $db->run('TRUNCATE t');
+}
+
+#[tests: expects death]
+test the_fake_stops_at_rows_for_a_write
+{
+    writeExpected();
+}
+
+/**
+ * Run a statement nothing was queued for.
+ */
+function nothingQueued() : void
+{
+    Db $db = Db(fake::Driver<Mysql>());
+    guard $db->run('TRUNCATE t');
+}
+
+#[tests: expects death]
+test the_fake_stops_at_an_unexpected_statement
+{
+    nothingQueued();
+}
+
+test listeners_hear_failures_and_parameters
+{
+    $w = World();
+    Log $log = Log();
+    $w->db->listen($log);
+    $w->fake->fails(failure(.duplicate))->rows([]);
+    result<Note, Error> $r = $w->notes->create(Note($title: 'Dup'));
+    assert($r->failed());
+    guard $w->notes->get(9);
+    assert($log->count() == 2);
+    assert($log->entries[0]->failed);
+    assert(!$log->entries[1]->failed);
+    assert($log->entries[1]->statement->params->count() == 1);
+    $log->clear();
+    assert($log->count() == 0);
+}
+
+test a_render_failure_never_reaches_the_driver
+{
+    $w = World();
+    Log $log = Log();
+    $w->db->listen($log);
+    result<uint64, Error> $r = $w->notes->find()->update(hydrahon::Values());
+    assert($r->failed());
+    match ($r->failure()) {
+        Error::render($e) => {},
+        else => { assert(false); },
+    };
+    assert($w->fake->count() == 0);
+    assert($log->count() == 0);
+}
+
+test schemas_name_other_databases
+{
+    $w = World();
+    assert($w->db->schema('cache') == null);
+    $w->db->schema('cache', 'notes_cache_prod');
+    assert(($w->db->schema('cache') ?? '') == 'notes_cache_prod');
+    assert(($w->db->connection()->schema('cache') ?? '') == 'notes_cache_prod');
+    $c = NoteCountTable::alias('nc', schema: $w->db->schema('cache'));
+    $w->fake->rows([]);
+    guard $w->notes->find()->scope(.all)->join(inner: $c, on: $c->noteId == NoteTable::$id)->get();
+    assert($w->fake->last() == selectNotes(' INNER JOIN `notes_cache_prod`.`note_counts` AS `nc` ON `nc`.`note_id` = `notes`.`id`'));
+    hydrahon::Term<int64> $col = carbon::select::column<int64>('note_counts', 'tags', $schema: 'archive');
+    hydrahon::Select $s = hydrahon::Select(from: hydrahon::Table(name: 'note_counts', $schema: 'archive'));
+    $s->fields([$col]);
+    hydrahon::Sql $sql = guard $s->sql(Mysql());
+    assert($sql->text == 'SELECT `note_counts`.`tags` FROM `archive`.`note_counts`');
+}
+
+test a_db_runs_on_the_clock_it_is_given
+{
+    $fake = fake::Driver<Mysql>();
+    carbon::clock::Fixed $clock = carbon::clock::Fixed(unix: 0);
+    Db $db = Db($fake, clock: $clock);
+    $db->register(fixtures::NoteRepository($db->connection()));
+    $fake->written($insertId: 1);
+    Note $n = guard $db->repo<fixtures::NoteRepository>()->create(Note($title: 'Epoch'));
+    DateTime $at = guard $n->createdAt;
+    assert($at->year == 1970);
+    // the system clock is the default, and it is not 1970
+    Connection $c = Connection(fake::Driver<Mysql>());
+    assert($c->clock->now()->year > 2000);
+}
+
+/**
+ * The fake, with transaction control that fails when told to.
+ */
+class Flaky : carbon::Driver
+{
+    public fake::Driver<Mysql> $inner = fake::Driver<Mysql>();
+    public bool $failBegin = false;
+    public bool $failCommit = false;
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error> { return $this->inner->render($q); }
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error> { return $this->inner->render($q); }
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error> { return $this->inner->render($q); }
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error> { return $this->inner->render($q); }
+    public function query(const Statement& $s) : result<carbon::Cursor, Error> { return $this->inner->query($s); }
+    public function exec(const Statement& $s) : result<Written, Error> { return $this->inner->exec($s); }
+    public const function traits() : Traits { return $this->inner->traits(); }
+
+    public function begin() : status<Error>
+    {
+        if ($this->failBegin) {
+            return .error(failure(.connection));
+        }
+        return $this->inner->begin();
+    }
+
+    public function commit() : status<Error>
+    {
+        if ($this->failCommit) {
+            return .error(failure(.deadlock));
+        }
+        return $this->inner->commit();
+    }
+
+    public function rollback() : status<Error>
+    {
+        return $this->inner->rollback();
+    }
+}
+
+/**
+ * Whether the work of a transaction ran.
+ */
+class Done
+{
+    public bool $yes = false;
+}
+
+test a_transaction_that_cannot_begin_runs_no_work
+{
+    Flaky $d = Flaky();
+    $d->failBegin = true;
+    Db $db = Db($d);
+    Done $ran = Done();
+    status<Error> $s = $db->transaction(function[$ran]() : status<Error> {
+        $ran->yes = true;
+        return .ok();
+    });
+    assert($s->failure()->fault() == Fault::connection);
+    assert(!$ran->yes);
+    assert(!$db->inTransaction());
+    result<int64, Error> $r = $db->transaction(function[$ran]() : result<int64, Error> {
+        $ran->yes = true;
+        return .ok(1);
+    });
+    assert($r->failed() && !$ran->yes);
+}
+
+test a_failed_commit_is_the_error
+{
+    Flaky $d = Flaky();
+    $d->failCommit = true;
+    Db $db = Db($d);
+    status<Error> $s = $db->transaction(function() : status<Error> { return .ok(); });
+    assert($s->failure()->retryable());
+    assert(!$db->inTransaction());
+    result<int64, Error> $r = $db->transaction(function() : result<int64, Error> { return .ok(1); });
+    assert($r->failure()->retryable());
+    // the connection takes the next transaction
+    $d->failCommit = false;
+    guard $db->transaction(function() : status<Error> { return .ok(); });
+    assert(str::join($d->inner->texts(), ' | ') == 'BEGIN | BEGIN | BEGIN | COMMIT');
+}
+
+test writes_inside_a_transaction
+{
+    $w = World();
+    $w->fake->written($insertId: 1)->written($insertId: 2);
+    fixtures::NoteRepository $notes = $w->notes;
+    fixtures::TagRepository $tags = $w->tags;
+    Tag $made = guard $w->db->transaction(function[$notes, $tags]() : result<Tag, Error> {
+        Note $n = guard $notes->create(Note($title: 'Parent')) else ($e) { return .error($e); }
+        return $tags->create(Tag($noteId: $n->id, $name: 'child'));
+    });
+    assert($made->id == 2 && $made->noteId == 1);
+    assert($w->fake->texts()[0] == 'BEGIN');
+    assert($w->fake->last() == 'COMMIT');
+    assert($w->fake->count() == 4);
+}
+
+test query_state_reads_back
+{
+    $w = World();
+    NoteQuery $q = $w->notes->find();
+    assert(!$q->limited() && !$q->ordered());
+    assert($q->limit(3)->limited());
+    assert($q->page(0, size: 3)->limited());
+    assert(!$q->offset(3)->limited());
+    assert($q->newest()->ordered());
+    assert($q->connection() == $w->db->connection());
+    assert($w->notes->connection() == $w->db->connection());
+}
+
+test offset_oldest_and_newest
+{
+    $w = World();
+    $w->fake->rows([])->rows([])->rows([]);
+    guard $w->notes->find()->scope(.all)->offset(5)->get();
+    // MySQL has no OFFSET without a LIMIT: the dialect writes the largest one
+    assert($w->fake->last() == selectNotes(' LIMIT 18446744073709551615 OFFSET 5'));
+    guard $w->notes->find()->scope(.all)->oldest()->get();
+    assert($w->fake->last() == selectNotes(' ORDER BY `notes`.`created_at` ASC'));
+    guard $w->notes->find()->scope(.all)->newest()->order(asc: NoteTable::$id)->get();
+    assert($w->fake->last() == selectNotes(' ORDER BY `notes`.`created_at` DESC, `notes`.`id` ASC'));
+}
+
+test a_page_of_nothing_reads_nothing
+{
+    $w = World();
+    $w->fake->rows([]);
+    guard $w->notes->find()->scope(.all)->page(7, size: 0)->get();
+    assert($w->fake->last() == selectNotes(' LIMIT 0 OFFSET 0'));
+}
+
+test right_joins_having_and_distinct
+{
+    $w = World();
+    $t = TagTable::alias('t');
+    $w->fake->rows([]);
+    guard $w->notes->find()->scope(.all)
+        ->join(right: $t, on: $t->noteId == NoteTable::$id)
+        ->group([NoteTable::$id])
+        ->having(hydrahon::fn::count() > 1)
+        ->distinct()
+        ->get();
+    assert($w->fake->last() == 'SELECT DISTINCT `notes`.`id`, `notes`.`title`, `notes`.`pinned`, `notes`.`mood`, `notes`.`body`, `notes`.`created_at`, `notes`.`updated_at`, `notes`.`deleted_at` FROM `notes` RIGHT JOIN `tags` AS `t` ON `t`.`note_id` = `notes`.`id` GROUP BY `notes`.`id` HAVING COUNT(*) > ?');
+}
+
+test a_count_with_a_limit_counts_at_most_the_limit
+{
+    $w = World();
+    $w->fake->rows([[Value::from(3)]]);
+    uint64 $n = guard $w->notes->find()->limit(3)->count();
+    assert($n == 3);
+    assert($w->fake->last() == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `notes` WHERE `notes`.`deleted_at` IS NULL LIMIT 3) AS `_h`');
+}
+
+test exists_keeps_conditions
+{
+    $w = World();
+    $w->fake->rows([[Value::from(1)]]);
+    bool $yes = guard $w->notes->find()->pinned()->exists();
+    assert($yes);
+    assert($w->fake->last() == 'SELECT `notes`.`id` FROM `notes` WHERE `notes`.`pinned` AND `notes`.`deleted_at` IS NULL LIMIT 1');
+}
+
+test the_repository_finds_by_condition
+{
+    $w = World();
+    $w->fake->rows([noteRow(2, 'Found')])->rows([])->rows([]);
+    Note? $hit = guard $w->notes->get(NoteTable::$title == 'Found');
+    Note $n = guard $hit;
+    assert($n->id == 2);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`title` = ? AND `notes`.`deleted_at` IS NULL LIMIT 1'));
+    Note? $miss = guard $w->notes->get(NoteTable::$title == 'Lost');
+    assert($miss == null);
+    result<Note, Error> $one = $w->notes->find()->where(NoteTable::$title == 'Lost')->one();
+    assert($one->failed());
+}
+
+test first_keeps_the_order_and_offset
+{
+    $w = World();
+    $w->fake->rows([noteRow(9, 'z')]);
+    Note? $last = guard $w->notes->find()->order(desc: NoteTable::$id)->offset(2)->first();
+    assert($last != null);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`deleted_at` IS NULL ORDER BY `notes`.`id` DESC LIMIT 1 OFFSET 2'));
+}
+
+test string_keys_find_many_and_walk_in_batches
+{
+    $w = World();
+    $w->fake->rows([[Value::from('a'), Value::from('1')], [Value::from('b'), Value::from('2')]]);
+    array<Setting> $two = guard $w->settings->many(['a', 'b']);
+    assert($two->count() == 2 && $two[1]->value == '2');
+    assert($w->fake->last() == 'SELECT `settings`.`name`, `settings`.`value` FROM `settings` WHERE `settings`.`name` IN (?, ?)');
+    $w->fake->rows([[Value::from('a'), Value::from('1')], [Value::from('b'), Value::from('2')]])->rows([]);
+    guard $w->settings->each(batch: 2, function(array<Setting> $batch) : status<Error> { return .ok(); });
+    assert($w->fake->last() == 'SELECT `settings`.`name`, `settings`.`value` FROM `settings` WHERE `settings`.`name` > ? ORDER BY `settings`.`name` ASC LIMIT 2');
+    assert($w->fake->sent(2, [Value::from('b')]));
+}
+
+test batches_load_relations_for_each_batch
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')])->rows([tagRow(10, 2, 'x')]);
+    $w->fake->rows([noteRow(3, 'c')])->rows([]);
+    Titles $seen = Titles();
+    guard $w->notes->find()->withTags()->each(batch: 2, function[$seen](array<Note> $batch) : status<Error> {
+        foreach ($batch as const &$n) {
+            $seen->titles[] = "{$n->title}:{$n->tags->count()}:{$n->tags->loaded()}";
+        }
+        return .ok();
+    });
+    assert(str::join($seen->titles, ' ') == 'a:0:true b:1:true c:0:true');
+    assert($w->fake->count() == 4);
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?)'));
+}
+
+test each_loads_no_relations
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')]);
+    Titles $seen = Titles();
+    guard $w->notes->find()->withTags()->each(function[$seen](Note $n) : status<Error> {
+        $seen->titles[] = "{$n->tags->loaded()}";
+        return .ok();
+    });
+    assert(str::join($seen->titles, ' ') == 'false');
+    assert($w->fake->count() == 1);
+}
+
+test bulk_writes_refuse_every_shape
+{
+    $w = World();
+    $t = TagTable::alias('t');
+    array<NoteQuery> $shaped = [
+        $w->notes->find()->offset(1),
+        $w->notes->find()->page(0, size: 5),
+        $w->notes->find()->distinct(),
+        $w->notes->find()->group([NoteTable::$mood->term]),
+        $w->notes->find()->having(hydrahon::fn::count() > 1),
+        $w->notes->find()->join(left: $t, on: $t->noteId == NoteTable::$id),
+        $w->notes->find()->adjust(function(hydrahon::Select& $s) : void { return; }),
+    ];
+    foreach ($shaped as &$q) {
+        result<uint64, Error> $u = $q->update([NoteTable::$pinned => true]);
+        assert($u->failed());
+        result<uint64, Error> $p = $q->purge();
+        assert($p->failed());
+    }
+    assert($w->fake->count() == 0);
+}
+
+test bulk_writes_follow_the_scope
+{
+    $w = World();
+    $w->fake->written(4)->written(1);
+    uint64 $all = guard $w->notes->find()->scope(.all)->update([NoteTable::$pinned => true]);
+    assert($all == 4);
+    assert($w->fake->last() == 'UPDATE `notes` SET `pinned` = ?');
+    // a bulk update stamps nothing: no model was loaded to stamp
+    uint64 $one = guard $w->notes->find()->where(NoteTable::$id == 3)->update([NoteTable::$title => 'x']);
+    assert($one == 1);
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ? WHERE `notes`.`id` = ? AND `notes`.`deleted_at` IS NULL');
+}
+
+test a_bulk_write_runs_the_apply_hook
+{
+    $w = World();
+    result<uint64, Error> $u = $w->notes->find()->refusing()->update([NoteTable::$pinned => true]);
+    assert(str::from($u->failure()) == 'invalid: told to refuse');
+    result<uint64, Error> $p = $w->notes->find()->refusing()->purge();
+    assert($p->failed());
+    result<bool, Error> $e = $w->notes->find()->refusing()->exists();
+    assert($e->failed());
+    result<Note?, Error> $f = $w->notes->find()->refusing()->first();
+    assert($f->failed());
+    status<Error> $each = $w->notes->find()->refusing()->each(function(Note $n) : status<Error> { return .ok(); });
+    assert($each->failed());
+    status<Error> $batches = $w->notes->find()->refusing()->each(batch: 2, function(array<Note> $b) : status<Error> { return .ok(); });
+    assert($batches->failed());
+    result<array<Note>, Error> $many = $w->notes->find()->refusing()->many([1]);
+    assert($many->failed());
+    assert($w->fake->count() == 0);
+}
+
+test computed_fields_find_their_place
+{
+    Selected $s = Selected();
+    $s->picks[] = Pick('other', NoteTable::$title);
+    $s->picks[] = Pick('tag_count', NoteTable::$id);
+    array<string> $names = ['tag_count', 'missing'];
+    $s->place($names, 8);
+    assert(($s->slot(0) ?? 0) == 9);
+    assert($s->slot(1) == null);
+    assert($s->slot(2) == null);
+    // a slot nothing placed yet is null
+    Selected $fresh = Selected();
+    assert($fresh->slot(0) == null);
+}
+
+test a_computed_field_selected_but_null_stays_null
+{
+    $w = World();
+    $c = NoteCountTable::alias('nc');
+    array<Value> $row = noteRow(1, 'a');
+    $row[] = Value::none;
+    $w->fake->rows([$row]);
+    Note $n = guard $w->notes->find()->join(left: $c, on: $c->noteId == NoteTable::$id)->select(NoteTable::$tagCount->from($c->tags))->one();
+    assert($n->tagCount == null);
+    array<Value> $bad = noteRow(1, 'a');
+    $bad[] = Value::from('three');
+    $w->fake->rows([$bad]);
+    result<Note, Error> $r = $w->notes->find()->join(left: $c, on: $c->noteId == NoteTable::$id)->select(NoteTable::$tagCount->from($c->tags))->one();
+    assert(str::from($r->failure()) == 'column tag_count holds another kind of value than the field');
+}
+
+test fresh_reads_a_new_copy_through_the_repository
+{
+    $w = World();
+    $w->fake->rows([noteRow(6, 'Old')])->rows([noteRow(6, 'New')])->rows([]);
+    Note $n = guard $w->notes->find()->one(6);
+    Note $f = guard $w->notes->fresh($n);
+    assert($f->title == 'New' && $f->link->persisted());
+    // a row gone since is missing
+    result<Note, Error> $gone = $n->fresh();
+    assert(str::from($gone->failure()) == 'no matching row');
+}
+
+test observers_run_in_the_order_they_were_added
+{
+    $w = World();
+    $w->notes->observe(Parrot($w->notes->trail, 'first'));
+    $w->notes->observe(Parrot($w->notes->trail, 'second'));
+    $w->fake->written($insertId: 1);
+    guard $w->notes->create(Note($title: 'Heard'));
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | first before | second before | first after | second after | repo after 0');
+}
+
+test events_that_save
+{
+    assert(Event::creating->saves());
+    assert(Event::updating->saves());
+    assert(!Event::deleting->saves());
+    assert(!Event::restoring->saves());
+}
+
+test snapshots_compare_every_kind
+{
+    assert(Snapshot::same(Value::uint(2), Value::uint(2)));
+    assert(!Snapshot::same(Value::uint(2), Value::uint(3)));
+    assert(Snapshot::same(Value::from(1.5), Value::from(1.5)));
+    assert(!Snapshot::same(Value::from(1.5), Value::from(2)));
+    assert(!Snapshot::same(Value::from(hydrahon::Decimal('1.5')), Value::from(hydrahon::Decimal('1.50'))));
+    assert(Snapshot::same(Value::from(Bytes('a')), Value::from(Bytes('a'))));
+    assert(Snapshot::same(Value::from(Date(2024, 1, 2)), Value::from(Date(2024, 1, 2))));
+    assert(!Snapshot::same(Value::from(Date(2024, 1, 2)), Value::from(Date(2024, 1, 3))));
+    assert(!Snapshot::same(Value::from(Date(2024, 1, 2)), Value::from(DateTime(2024, 1, 2, 0, 0, 0))));
+    assert(!Snapshot::same(Value::from(DateTime(2024, 1, 2, 0, 0, 0, 1)), Value::from(DateTime(2024, 1, 2, 0, 0, 0, 2))));
+    assert(Snapshot::same(Value::from(Time(false, 1, 2, 3, 4)), Value::from(Time(false, 1, 2, 3, 4))));
+    assert(!Snapshot::same(Value::from(Time(false, 1, 2, 3, 4)), Value::from(Time(true, 1, 2, 3, 4))));
+    assert(!Snapshot::same(Value::from(false), Value::from(0)));
+    assert(!Snapshot::same(Value::from('1'), Value::from(1)));
+    // a snapshot with no values yet, as a new model has, differs in every column
+    Snapshot $empty = Snapshot();
+    Snapshot $now = Snapshot([Value::from(1), Value::none]);
+    assert($empty->changes($now)->count() == 2);
+}
+
+test statements_without_parameters
+{
+    Statement $s = Statement(plain: 'BEGIN');
+    assert($s->text == 'BEGIN');
+    assert($s->params->count() == 0);
+}
+
+test slots_hold_what_a_loader_set
+{
+    carbon::One<Note> $one = .unloaded();
+    $one->set(null);
+    assert($one->loaded() && $one->get() == null);
+    $one->set(Note($title: 'x'));
+    Note $n = guard $one->get();
+    assert($n->title == 'x');
+    carbon::Many<Tag> $many = .unloaded();
+    array<Tag> $none = [];
+    $many->set($none);
+    assert($many->loaded() && $many->count() == 0);
+}
+
+/**
+ * Titles a visitor saw.
+ */
+class Titles
+{
+    public array<string> $titles = [];
+}
+
+/**
+ * Repeats what it hears into a trail, under its own name.
+ */
+class Parrot : carbon::Observer<Note>
+{
+    public fixtures::Trail $trail;
+    public string $name;
+
+    public function before(Event $event, Note& $model) : status<Error>
+    {
+        $this->trail->heard[] = "{$this->name} before";
+        return .ok();
+    }
+
+    public function after(Event $event, const Note& $model) : void
+    {
+        $this->trail->heard[] = "{$this->name} after";
+    }
+}

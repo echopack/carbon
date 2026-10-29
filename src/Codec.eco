@@ -1,0 +1,15 @@
+namespace carbon;
+
+/**
+ * Turns a field of type `T` into a column of a value kind `Raw` (one of hydrahon's: `int64`,
+ * `string`, `hydrahon::DateTime`, ...) and back. carbongen calls it for fields marked
+ * `#[carbon::codec: 'Name']`: carbon's own `json`, `csv` and `lines` (in `carbon::codec`), or
+ * any type of the model's module conforming to this. Backed enums need no codec.
+ *
+ * A nullable field keeps SQL NULL to itself: the codec only ever sees a value.
+ */
+public interface Codec<T, Raw>
+{
+    const function decode(Raw $raw) : result<T, Problem>;
+    const function encode(const T& $value) : Raw;
+}

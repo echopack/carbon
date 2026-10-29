@@ -1,0 +1,11 @@
+namespace carbon::select;
+
+/**
+ * Column `$name` of table `$table`, in database `$schema` when it lives in another one,
+ * unaliased: what a generated column static is made of, `PostTable::$title`.
+ */
+public function column<T>(const string& $table, const string& $name, string? $schema = null) : hydrahon::Term<T>
+{
+    hydrahon::Table $t = hydrahon::Table(name: $table, $schema: $schema);
+    return $t->column<T>($name);
+}

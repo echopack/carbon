@@ -1,0 +1,9 @@
+namespace fixtures;
+
+/**
+ * A list of what was heard, shared by reference.
+ */
+public class Trail
+{
+    public array<string> $heard = [];
+}

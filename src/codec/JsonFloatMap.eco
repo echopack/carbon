@@ -1,0 +1,35 @@
+namespace carbon::codec;
+
+/**
+ * `map<string, float64>` as a JSON object: `{"k":1.5}`, keys in sorted order so the same map
+ * always stores the same text. An integer is read as its float.
+ */
+public struct JsonFloatMap : carbon::Codec<map<string, float64>, string>
+{
+    public const function decode(string $raw) : result<map<string, float64>, carbon::Problem>
+    {
+        ordered_map<string, json::Value> $fields = guard Doc::fields($raw) else ($p) {
+            return .error($p);
+        }
+        map<string, float64> $out = [];
+        foreach ($fields as $k => const &$v) {
+            float64 $x = guard $v->asFloat() else {
+                return .error(Doc::field($k, 'a number'));
+            }
+            $out[$k] = $x;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const map<string, float64>& $value) : string
+    {
+        array<string> $keys = $value->keys();
+        $keys->sort();
+        json::Value $doc = json::object();
+        foreach ($keys as const &$k) {
+            float64 $x = $value->get($k);
+            $doc[$k] = json::float($x);
+        }
+        return json::dump($doc);
+    }
+}

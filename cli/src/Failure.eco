@@ -1,0 +1,19 @@
+namespace carbongen;
+
+public enum Failure
+{
+    case tool(string $status, string $stderr);
+    case input(string $message);
+    case problems(int32 $count);
+    case stale;
+
+    public const function message() : string
+    {
+        return match ($this) {
+            Failure::tool($status, $stderr) => "echoc -p decls failed ({$status}):\n{$stderr}",
+            Failure::input($message) => $message,
+            Failure::problems($count) => "{$count} problem(s) in #[carbon::...] declarations",
+            Failure::stale => '.carbon/models.eco is out of date; run carbongen',
+        };
+    }
+}

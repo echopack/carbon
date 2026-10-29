@@ -1,0 +1,251 @@
+use carbon::Error;
+use hydrahon::Value;
+use fixtures::{World, Note, Tag, Mood, NoteQuery, NoteTable, TagTable, NoteCountTable, noteRow, tagRow, selectNotes, selectTags};
+
+test a_custom_finder_composes_scopes
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'Yay', true, .happy)]);
+    array<Note> $found = guard $w->notes->cheerful();
+    assert($found->count() == 1);
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`mood` = ? AND `notes`.`deleted_at` IS NULL ORDER BY `notes`.`created_at` DESC'));
+    assert($w->fake->sent(0, [Value::from(1)]));
+}
+
+test scopes_combine_with_or_inside_one_condition
+{
+    $w = World();
+    $w->fake->rows([]);
+    guard $w->notes->find()->where(NoteTable::$pinned || NoteTable::$mood->is(Mood::grumpy))->order(asc: NoteTable::$title)->get();
+    assert($w->fake->last() == selectNotes(' WHERE (`notes`.`pinned` OR `notes`.`mood` = ?) AND `notes`.`deleted_at` IS NULL ORDER BY `notes`.`title` ASC'));
+}
+
+test a_query_is_a_value
+{
+    $w = World();
+    $w->fake->rows([])->rows([]);
+    NoteQuery $all = $w->notes->query();
+    NoteQuery $pinned = $all->pinned();
+    guard $pinned->feeling(.happy)->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`mood` = ? AND `notes`.`deleted_at` IS NULL'));
+    // neither the query it came from nor the one before it changed
+    guard $all->get();
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`deleted_at` IS NULL'));
+}
+
+test scopes_see_live_all_or_trashed_rows
+{
+    $w = World();
+    $w->fake->rows([])->rows([]);
+    guard $w->notes->find()->scope(.all)->get();
+    assert($w->fake->last() == selectNotes(''));
+    guard $w->notes->find()->scope(.trashed)->get();
+    assert($w->fake->last() == selectNotes(' WHERE NOT (`notes`.`deleted_at` IS NULL)'));
+}
+
+test a_model_without_soft_delete_has_only_live_rows
+{
+    $w = World();
+    $w->fake->rows([])->rows([]);
+    guard $w->tags->all();
+    assert($w->fake->last() == selectTags(''));
+    guard $w->tags->find()->scope(.trashed)->get();
+    assert($w->fake->last() == selectTags(''));
+}
+
+test paging_and_ordering
+{
+    $w = World();
+    $w->fake->rows([])->rows([])->rows([]);
+    guard $w->notes->find()->scope(.all)->page(2, size: 10)->get();
+    assert($w->fake->last() == selectNotes(' LIMIT 10 OFFSET 20'));
+    // a page index past the end of uint64 starts past every row instead of wrapping (the
+    // dialect caps the offset at the largest it can send)
+    $w->fake->rows([]);
+    guard $w->notes->find()->scope(.all)->page(4611686018427387904, size: 20)->get();
+    assert($w->fake->last() == selectNotes(' LIMIT 20 OFFSET 9223372036854775807'));
+    guard $w->notes->find()->scope(.all)->order(desc: NoteTable::$title)->order([NoteTable::$mood->asc()])->limit(5)->get();
+    assert($w->fake->last() == selectNotes(' ORDER BY `notes`.`title` DESC, `notes`.`mood` ASC LIMIT 5'));
+    // newest goes by the created timestamp, and by the key for a model without one
+    guard $w->tags->find()->newest()->get();
+    assert($w->fake->last() == selectTags(' ORDER BY `tags`.`id` DESC'));
+}
+
+test first_count_and_exists
+{
+    $w = World();
+    $w->fake->rows([])->rows([[Value::from(4)]])->rows([[Value::from(9)]])->rows([]);
+    Note? $none = guard $w->notes->find()->first();
+    assert($none == null);
+    uint64 $n = guard $w->notes->find()->pinned()->count();
+    assert($n == 4);
+    assert($w->fake->last() == 'SELECT COUNT(*) AS `count` FROM `notes` WHERE `notes`.`pinned` AND `notes`.`deleted_at` IS NULL');
+    bool $yes = guard $w->notes->exists();
+    assert($yes);
+    assert($w->fake->last() == 'SELECT `notes`.`id` FROM `notes` WHERE `notes`.`deleted_at` IS NULL LIMIT 1');
+    bool $no = guard $w->notes->exists();
+    assert(!$no);
+}
+
+test apply_runs_once_per_terminal_and_its_error_comes_back
+{
+    $w = World();
+    $w->fake->rows([])->rows([[Value::from(2)]])->rows([noteRow(1, 'a')]);
+    NoteQuery $q = $w->notes->query();
+    guard $q->get();
+    guard $q->count();
+    guard $q->get(1);
+    assert($q->applied->heard->count() == 3);
+    result<array<Note>, Error> $r = $q->refusing()->get();
+    assert($r->failed());
+    assert(str::from($r->failure()) == 'invalid: told to refuse');
+    assert($w->fake->count() == 3);
+}
+
+test each_streams_linked_models
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b'), noteRow(3, 'c')]);
+    // a closure captures by value, so the visitor reports through a class it shares
+    Seen $seen = Seen();
+    guard $w->notes->each(function[$seen](Note $n) : status<Error> {
+        $seen->titles[] = $n->title;
+        $seen->linked = $seen->linked && $n->link->persisted();
+        return .ok();
+    });
+    assert(str::join($seen->titles, ' | ') == 'a | b | c');
+    assert($seen->linked);
+}
+
+test each_stops_at_the_first_failure
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    Seen $seen = Seen();
+    status<Error> $s = $w->notes->find()->each(function[$seen](Note $n) : status<Error> {
+        $seen->titles[] = $n->title;
+        return .error(.refused('enough'));
+    });
+    assert($s->failed());
+    assert($seen->titles->count() == 1);
+}
+
+test batches_walk_the_key
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')])->rows([noteRow(5, 'c'), noteRow(6, 'd')])->rows([noteRow(9, 'e')]);
+    Seen $seen = Seen();
+    guard $w->notes->find()->pinned()->order(desc: NoteTable::$title)->each(batch: 2, function[$seen](array<Note> $batch) : status<Error> {
+        $seen->titles[] = "{$batch->count()}";
+        return .ok();
+    });
+    assert(str::join($seen->titles, ' ') == '2 2 1');
+    assert($w->fake->count() == 3);
+    assert($w->fake->texts()[0] == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`deleted_at` IS NULL ORDER BY `notes`.`id` ASC LIMIT 2'));
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`id` > ? AND `notes`.`deleted_at` IS NULL ORDER BY `notes`.`id` ASC LIMIT 2'));
+    assert($w->fake->sent(2, [Value::from(6)]));
+}
+
+test batches_stop_on_an_empty_page_and_at_a_refusal
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')])->rows([]);
+    Seen $seen = Seen();
+    guard $w->notes->each(batch: 2, function[$seen](array<Note> $batch) : status<Error> {
+        $seen->titles[] = "{$batch->count()}";
+        return .ok();
+    });
+    assert(str::join($seen->titles, ' ') == '2');
+    assert($w->fake->count() == 2);
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    status<Error> $s = $w->notes->each(batch: 2, function(array<Note> $batch) : status<Error> {
+        return .error(.refused('one is enough'));
+    });
+    assert($s->failed());
+    assert($w->fake->count() == 3);
+}
+
+test joins_and_computed_fields
+{
+    $w = World();
+    $c = NoteCountTable::alias('nc');
+    $w->fake->rows([[Value::from(1), Value::from('a'), Value::from(false), Value::from(0), Value::none, Value::none, Value::none, Value::none, Value::from(3)]]);
+    array<Note> $found = guard $w->notes->query()
+        ->join(left: $c, on: $c->noteId == NoteTable::$id)
+        ->select(NoteTable::$tagCount->from($c->tags))
+        ->where($c->tags > 1)
+        ->get();
+    assert($w->fake->last() == 'SELECT `notes`.`id`, `notes`.`title`, `notes`.`pinned`, `notes`.`mood`, `notes`.`body`, `notes`.`created_at`, `notes`.`updated_at`, `notes`.`deleted_at`, `nc`.`tags` AS `tag_count` FROM `notes` LEFT JOIN `note_counts` AS `nc` ON `nc`.`note_id` = `notes`.`id` WHERE `nc`.`tags` > ? AND `notes`.`deleted_at` IS NULL');
+    assert(($found[0]->tagCount ?? 0) == 3);
+    // a computed field is never written back, and a query that did not select it leaves it be
+    assert(!$found[0]->dirty());
+    $w->fake->rows([noteRow(1, 'a')]);
+    Note $plain = guard $w->notes->find()->one(1);
+    assert($plain->tagCount == null);
+}
+
+test grouping_and_counting_groups
+{
+    $w = World();
+    $t = TagTable::alias('t');
+    $w->fake->rows([[Value::from(2)]]);
+    uint64 $n = guard $w->notes->find()->join(inner: $t, on: $t->noteId == NoteTable::$id)->group([NoteTable::$id])->count();
+    assert($n == 2);
+    assert($w->fake->last() == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `notes` INNER JOIN `tags` AS `t` ON `t`.`note_id` = `notes`.`id` WHERE `notes`.`deleted_at` IS NULL GROUP BY `notes`.`id`) AS `_h`');
+}
+
+test bulk_update_and_purge
+{
+    $w = World();
+    $w->fake->written(3)->written(2);
+    uint64 $changed = guard $w->notes->find()->feeling(.grumpy)->update([NoteTable::$pinned => false]);
+    assert($changed == 3);
+    assert($w->fake->last() == 'UPDATE `notes` SET `pinned` = ? WHERE `notes`.`mood` = ? AND `notes`.`deleted_at` IS NULL');
+    uint64 $gone = guard $w->notes->find()->scope(.trashed)->purge();
+    assert($gone == 2);
+    assert($w->fake->last() == 'DELETE FROM `notes` WHERE NOT (`notes`.`deleted_at` IS NULL)');
+}
+
+test bulk_writes_refuse_what_they_cannot_carry
+{
+    $w = World();
+    result<uint64, Error> $limited = $w->notes->find()->newest()->limit(1)->purge();
+    assert(str::from($limited->failure()) == 'invalid: purge runs on the conditions alone, not on a limit or a page; load the models instead');
+    $t = TagTable::alias('t');
+    result<uint64, Error> $joined = $w->notes->find()->join(inner: $t, on: $t->noteId == NoteTable::$id)->update([NoteTable::$pinned => false]);
+    assert(str::from($joined->failure()) == 'invalid: update runs on the conditions alone, not on joins, groups or an adjusted select');
+    assert($w->fake->count() == 0);
+    // an order alone does not change which rows match
+    $w->fake->written(1);
+    guard $w->notes->find()->newest()->purge();
+    assert($w->fake->last() == 'DELETE FROM `notes` WHERE `notes`.`deleted_at` IS NULL');
+}
+
+test the_select_escape_hatch
+{
+    $w = World();
+    $w->fake->rows([]);
+    guard $w->notes->find()->scope(.all)->adjust(function(hydrahon::Select& $s) : void {
+        $s->distinct();
+    })->get();
+    assert($w->fake->last() == 'SELECT DISTINCT `notes`.`id`, `notes`.`title`, `notes`.`pinned`, `notes`.`mood`, `notes`.`body`, `notes`.`created_at`, `notes`.`updated_at`, `notes`.`deleted_at` FROM `notes`');
+}
+
+test a_render_failure_is_reported
+{
+    $w = World();
+    hydrahon::Values $nothing = hydrahon::Values();
+    result<uint64, Error> $r = $w->notes->find()->update($nothing);
+    assert($r->failed());
+    assert(str::from($r->failure()) == 'invalid statement: update without assignments');
+    assert($w->fake->count() == 0);
+}
+
+/**
+ * What a visitor saw.
+ */
+class Seen
+{
+    public array<string> $titles = [];
+    public bool $linked = true;
+}

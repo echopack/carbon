@@ -1,0 +1,20 @@
+namespace carbon;
+
+/**
+ * A database error in the driver's own words, plus the `Fault` it maps to.
+ */
+public struct Failure
+{
+    public Fault $fault = .other;
+    public string $message = '';
+
+    /**
+     * The five character SQLSTATE, when the server sent one.
+     */
+    public string? $state = null;
+
+    /**
+     * The server's own error number, when it has one.
+     */
+    public int64? $code = null;
+}

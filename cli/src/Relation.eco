@@ -1,0 +1,21 @@
+namespace carbongen;
+
+/**
+ * One relation slot (`carbon::One<T>` or `carbon::Many<T>`) and the key fields that tie it.
+ */
+public struct Relation
+{
+    public string $property;
+    public Direction $direction;
+
+    /**
+     * The related model.
+     */
+    public string $target;
+
+    /**
+     * For `belongsTo`, the field on this model that holds the target's key. Otherwise the
+     * field on the target that holds this model's key.
+     */
+    public string $foreign;
+}

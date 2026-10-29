@@ -1,0 +1,85 @@
+namespace carbon::relation;
+
+/**
+ * How a relation queries its related models `T` through their query type `Q`: an optional
+ * query to start from, extra conditions, callbacks that change the query and the relations of
+ * `T` to load in turn. A relation keeps one and builds its query with it, so nesting and
+ * constraints need no code of their own. The query starts from the repository registered for
+ * `T`, its `query()`, so the related model's scopes, state and `apply()` all take part.
+ */
+public class Fetch<T, Q>
+{
+    internal Q? $base = null;
+    internal array<hydrahon::Term<bool>> $conditions = [];
+    internal array<function<Q(Q)>> $callbacks = [];
+    internal array<Eager<T>> $nested = [];
+
+    public constructor()
+    {
+    }
+
+    /**
+     * Start from `$base` instead of a plain query: its conditions, order, scope and relations
+     * all apply. Queries are values, so `$base` itself is never changed.
+     */
+    public function from(Q $base) : void
+    {
+        $this->base = mv $base;
+    }
+
+    public function where(hydrahon::Term<bool> $condition) : void
+    {
+        $this->conditions[] = mv $condition;
+    }
+
+    /**
+     * Let `$constrain` change the query before it runs: order, scope, scopes of its own. It is
+     * handed a fresh query every time the relation loads, and its answer is what runs.
+     */
+    public function constrain(function<Q(Q)> $constrain) : void
+    {
+        $this->callbacks[] = mv $constrain;
+    }
+
+    public function with(Eager<T> $relation) : void
+    {
+        $this->nested[] = mv $relation;
+    }
+
+    /**
+     * The query for the related rows `$keys` picks, constraints and nested relations applied.
+     */
+    public const function query(Connection $db, hydrahon::Term<bool> $keys) : Q
+    {
+        Q $q = $this->start($db);
+        // the query is this method's own, so it changes in place rather than copy by copy
+        $q->rows()->conditions[] = $keys;
+        foreach ($this->conditions as const &$c) {
+            $q->rows()->conditions[] = $c;
+        }
+        foreach ($this->callbacks as const &$constrain) {
+            $q = $constrain(mv $q);
+        }
+        foreach ($this->nested as const &$n) {
+            $q->rows()->eager[] = $n;
+        }
+        return $q;
+    }
+
+    /**
+     * The base query, or the related repository's own when there is none.
+     */
+    internal const function start(Connection $db) : Q
+    {
+        if ($this->base != null) {
+            Q $b = guard $this->base;
+            return $b;
+        }
+        // a bare query only finds the store; the repository registered for it builds the real one
+        Q $bare = Q($db);
+        $repo = guard $bare->rows()->store->owner() else {
+            die('carbon: a relation loads models whose repository is not registered on the Db');
+        };
+        return $repo->query();
+    }
+}

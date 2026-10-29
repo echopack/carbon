@@ -1,0 +1,52 @@
+namespace fixtures;
+
+public class NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteLoading
+{
+    public carbon::Connection $db;
+
+    /**
+     * What the hooks heard, shared with observers so the order shows.
+     */
+    public Trail $trail = Trail();
+
+    /**
+     * Narrow every query this repository starts to pinned notes, relations included.
+     */
+    public bool $pinnedOnly = false;
+
+    public function query() : NoteQuery
+    {
+        if ($this->pinnedOnly) {
+            return NoteQuery($this->db)->pinned();
+        }
+        return NoteQuery($this->db);
+    }
+
+    /**
+     * Trims titles on every save, refuses an empty one.
+     */
+    public function before(carbon::Event $event, Note& $note) : status<carbon::Error>
+    {
+        $this->trail->heard[] = "repo before {$event->value()}";
+        if ($event->saves()) {
+            $note->title = str::trim($note->title);
+            if ($note->title->empty()) {
+                return .error(.refused('a note needs a title'));
+            }
+        }
+        return .ok();
+    }
+
+    public function after(carbon::Event $event, const Note& $note) : void
+    {
+        $this->trail->heard[] = "repo after {$event->value()}";
+    }
+
+    /**
+     * A custom finder: pinned happy notes, newest first.
+     */
+    public function cheerful() : result<array<Note>, carbon::Error>
+    {
+        return $this->find()->pinned()->feeling(.happy)->newest()->get();
+    }
+}

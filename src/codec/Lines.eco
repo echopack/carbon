@@ -1,0 +1,53 @@
+namespace carbon::codec;
+
+/**
+ * `array<string>` as text with one item per line, every line ending in a newline. No items is
+ * the empty string; one empty item is a lone newline. Reading also takes `\r\n` and a last
+ * line without its newline.
+ *
+ * ```echo
+ * #[carbon::codec: 'lines']
+ * public array<string> $steps = [];
+ * ```
+ *
+ * An item holding a line break cannot be a line: storing one stops the program, the way a
+ * value that has no column form should.
+ */
+public struct Lines : carbon::Codec<array<string>, string>
+{
+    public const function decode(string $raw) : result<array<string>, carbon::Problem>
+    {
+        array<string> $out = [];
+        if ($raw->empty()) {
+            return .ok(mv $out);
+        }
+        array<string> $parts = str::split($raw, "\n")->owned();
+        usize $n = $parts->count();
+        if ($parts[$n - 1]->empty()) {
+            $n = $n - 1;
+        }
+        usize $i = 0;
+        while ($i < $n) {
+            string $line = $parts[$i];
+            if ($line->ends("\r")) {
+                $line = $line->sub(0, $line->size() - 1);
+            }
+            $out[] = $line;
+            $i = $i + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<string>& $value) : string
+    {
+        string $out = '';
+        foreach ($value as const &$item) {
+            if ($item->contains("\n") || $item->contains("\r")) {
+                die('carbon::codec::Lines: an item holds a line break, so it cannot be stored as a line');
+            }
+            $out->append($item);
+            $out->append("\n");
+        }
+        return $out;
+    }
+}

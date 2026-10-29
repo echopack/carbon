@@ -1,0 +1,207 @@
+namespace carbongen;
+
+/**
+ * app::Note in database `cache`: a uint64 key, enums backed by int64, uint64 and int32 (the
+ * last one nullable), a nullable int16, a float32, a nullable decimal and an updated stamp.
+ */
+internal function wide() : string
+{
+    array<string> $more = [
+        field('id', 2, prim('uint64'), '', true),
+        field('wide', 3, named('app::Wide', ''), '', true),
+        field('big', 4, named('app::Big', ''), '', true),
+        field('mid', 5, optional(named('app::Mid', '')), '', true),
+        field('views', 6, optional(prim('int16')), '', true),
+        field('ratio', 7, prim('float32'), '', true),
+        field('price', 8, optional(named('hydrahon::Decimal', '')), '', true),
+        field('touched', 9, named('hydrahon::DateTime', ''), tool('updated', ''), true),
+    ];
+    array<string> $all = [
+        enumeration('app::Wide', prim('int64')),
+        enumeration('app::Big', prim('uint64')),
+        enumeration('app::Mid', prim('int32')),
+        decl('class', 'app::Note', 1, both(tool('model', 'notes'), tool('schema', 'cache')), fields('app::NoteRepository', $more)),
+    ];
+    return str::join($all, ', ');
+}
+
+test a_schema_names_the_database_everywhere
+{
+    string $out = emitted(wide());
+    assert($out->contains("    public static hydrahon::Term<uint64> $id = carbon::select::column<uint64>('notes', 'id', $schema: 'cache');"));
+    assert($out->contains("        $this->carbonTable = hydrahon::Table(name: 'notes', $schema: 'cache');"));
+    assert($out->contains("    public static function alias(string $alias, schema: string? $schema = 'cache') : NoteTableAlias"));
+    assert($out->contains("    public constructor(alias: string $alias, schema: string? $schema = 'cache')"));
+    // the aliased handle hands the schema on rather than spelling it again
+    assert($out->contains("        $this->id = $this->carbonTable->column<uint64>('id');"));
+}
+
+test a_uint64_key
+{
+    string $out = emitted(wide());
+    assert($out->contains('public class NoteTable : hydrahon::Source, carbon::Schema<app::Note, uint64, app::NoteRepository>'));
+    assert($out->contains('    public const function keyIs(uint64 $key) : hydrahon::Term<bool>'));
+    assert($out->contains('    public const function keyIn(const array<uint64>& $keys) : hydrahon::Term<bool>'));
+    assert($out->contains("        uint64 $c0 = guard $row->uint(0) else \{ return .error(.column('id', carbon::Problem::of($row, 0))); }"));
+    // the driver hands back an int64 insert id
+    assert($out->contains("    public const function inserted(app::Note& $m, int64 $key) : void\n    \{\n        $m->id = $key as uint64;\n    }"));
+    assert($out->contains('public type NoteRows = carbon::Rows<app::Note, uint64, app::NoteTable, app::NoteRepository>;'));
+    assert($out->contains('public type NoteRepository = carbon::Records<app::Note, app::NoteQuery, uint64>;'));
+}
+
+test enums_of_every_integer_backing
+{
+    string $out = emitted(wide());
+    // int64: read and compared as it is, no range check
+    assert($out->contains("        int64 $r1 = guard $row->int(1) else \{ return .error(.column('wide', carbon::Problem::of($row, 1))); }\n        app::Wide $c1 = guard app::Wide::from($r1) else \{ return .error(.column('wide', .unknown)); }"));
+    assert($out->contains("    public static WideColumn $wide = WideColumn(carbon::select::column<int64>('notes', 'wide', $schema: 'cache'));"));
+    // uint64: stored as uint64
+    assert($out->contains("        uint64 $r2 = guard $row->uint(2) else \{ return .error(.column('big', carbon::Problem::of($row, 2))); }\n        app::Big $c2 = guard app::Big::from($r2) else"));
+    assert($out->contains('        uint64 $s2 = $m->big->value() as uint64;'));
+    assert($out->contains("public struct BigColumn\n\{"));
+    assert($out->contains('    public hydrahon::Term<uint64> $term;'));
+    assert($out->contains('            $raw[] = $v->value() as uint64;'));
+    assert($out->contains("operator (hydrahon::Values& $into)[const BigColumn& $column] = (app::Big $case) : void\n\{\n    uint64 $raw = $case->value() as uint64;"));
+    // int32, nullable: range checked, narrowed, then looked up; the column stays a bare term
+    assert($out->contains("        app::Mid? $c3 = null;\n        if (!$row->isNull(3)) \{\n            int64 $r3 = guard $row->int(3) else"));
+    assert($out->contains("            if ($r3 < -2147483648 || $r3 > 2147483647) \{\n                return .error(.column('mid', .range));\n            }\n            int32 $b3 = $r3 as int32;\n            app::Mid $v3 = guard app::Mid::from($b3) else"));
+    assert($out->contains("    public static hydrahon::Term<int64?> $mid = carbon::select::column<int64?>('notes', 'mid', $schema: 'cache');"));
+    assert($out->contains("            int64? $s3 = null;\n            if ($m->mid != null) \{\n                app::Mid $x3 = guard $m->mid;\n                $s3 = $x3->value() as int64;\n            }\n            $into[NoteTable::$mid] = $s3;"));
+    assert(!$out->contains('MidColumn'));
+}
+
+test narrow_numbers_and_other_kinds
+{
+    string $out = emitted(wide());
+    assert($out->contains("        int16? $c4 = null;\n        if (!$row->isNull(4)) \{\n            int64 $r4 = guard $row->int(4) else"));
+    assert($out->contains("            if ($r4 < -32768 || $r4 > 32767) \{\n                return .error(.column('views', .range));\n            }\n            int16 $v4 = $r4 as int16;\n            $c4 = $v4;"));
+    assert($out->contains("        int64? $s4 = null;\n        if ($m->views != null) \{\n            int16 $x4 = guard $m->views;\n            $s4 = $x4 as int64;\n        }"));
+    // a float32 has no range check
+    assert($out->contains("        float64 $r5 = guard $row->float(5) else \{ return .error(.column('ratio', carbon::Problem::of($row, 5))); }\n        float32 $c5 = $r5 as float32;"));
+    assert($out->contains('        float64 $s5 = $m->ratio as float64;'));
+    assert($out->contains("            hydrahon::Decimal $v6 = guard $row->decimal(6) else"));
+    assert($out->contains('        hydrahon::Decimal? $s6 = $m->price;'));
+    assert($out->contains("        hydrahon::DateTime $c7 = guard $row->datetime(7) else"));
+    assert($out->contains('        return .ok(app::Note($id: $c0, $wide: $c1, $big: $c2, $mid: $c3, $views: $c4, $ratio: $c5, $price: $c6, $touched: $c7));'));
+}
+
+test an_updated_stamp_is_set_on_every_write
+{
+    string $out = emitted(wide());
+    assert($out->contains("    public const function stamp(app::Note& $m, carbon::Event $event, hydrahon::DateTime $now) : void\n    \{\n        $m->touched = $now;\n    }"));
+    // no created stamp, so no created() order
+    assert(!$out->contains('    public const function created() : hydrahon::Order?'));
+}
+
+test a_model_without_relations_gets_no_loader
+{
+    string $out = emitted(wide());
+    assert(!$out->contains('NoteRelations') && !$out->contains('NoteLoad') && !$out->contains('carbon::Eager'));
+    assert($out->contains("public struct NoteQuery : carbon::Query<app::Note, NoteQuery>\n\{"));
+}
+
+/**
+ * `Setting` outside any namespace with a string key the app assigns; app::Comment with
+ * exact column names, a string id, an optional setting and notes in namespace `other`.
+ */
+internal function spread() : string
+{
+    array<string> $s = [field('name', 2, TEXT, tool('key', 'assigned'), true)];
+    array<string> $c = [
+        field('id', 6, TEXT, '', true),
+        field('settingName', 7, optional(TEXT), ''),
+        field('setting', 8, named('carbon::One', named('Setting', '')), tool('belongsTo', 'settingName'), true),
+        field('notes', 9, named('carbon::Many', named('other::Note', '')), tool('hasMany', 'commentId'), true),
+    ];
+    array<string> $n = [field('commentId', 12, TEXT, '')];
+    array<string> $all = [
+        decl('class', 'Setting', 1, tool('model', 'settings'), fields('SettingRepository', $s)),
+        decl('class', 'app::Comment', 5, both(tool('model', 'comments'), tool('columns', 'exact')), fields('app::CommentRepository', $c)),
+        model('other::Note', 'notes', 10, 'other::NoteRepository', $n),
+    ];
+    return str::join($all, ', ');
+}
+
+test models_outside_a_namespace_come_first
+{
+    string $out = emitted(spread());
+    usize $global = $out->find('public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string, SettingRepository>');
+    usize $app = $out->find("\nnamespace app;\n");
+    usize $other = $out->find("\nnamespace other;\n");
+    assert($global < $app && $app < $other && $other < $out->size());
+    assert($out->contains('public type SettingRepository = carbon::Records<Setting, SettingQuery, string>;'));
+    assert($out->contains("    public const function inserted(Setting& $m, int64 $key) : void\n    \{\n    }"));
+}
+
+test exact_names_and_string_keys
+{
+    string $out = emitted(spread());
+    assert($out->contains("    public static hydrahon::Term<string?> $settingName = carbon::select::column<string?>('comments', 'settingName');"));
+    // the notes keep snake case
+    assert($out->contains("    public static hydrahon::Term<string> $commentId = carbon::select::column<string>('notes', 'comment_id');"));
+    // an unmarked string id is a key the app assigns
+    assert($out->contains("public class CommentTable : hydrahon::Source, carbon::Schema<app::Comment, string, app::CommentRepository>"));
+    assert($out->contains("    public const function generated() : bool\n    \{\n        return false;\n    }\n\n    public const function keyOf(const app::Comment& $m) : string"));
+}
+
+test relations_across_namespaces_and_string_keys
+{
+    string $out = emitted(spread());
+    // a nullable string key to a model outside any namespace
+    assert($out->contains('        carbon::relation::Keys<string> $keys = carbon::relation::Keys<string>();'));
+    assert($out->contains('        carbon::relation::Index<string, Setting> $by = carbon::relation::Index<string, Setting>();'));
+    assert($out->contains("            if ($m->settingName != null) \{\n                string $k = guard $m->settingName;\n                $keys->add($k);"));
+    assert($out->contains('            SettingQuery $q = $this->fetch->query($db, SettingTable::$name in $keys->list());'));
+    // the related model of another namespace is named in full
+    assert($out->contains('    internal carbon::relation::Fetch<other::Note, other::NoteQuery> $fetch;'));
+    assert($out->contains('            other::NoteQuery $q = $this->fetch->query($db, other::NoteTable::$commentId in $keys->list());'));
+    assert($out->contains('        carbon::relation::Index<string, other::Note> $by = carbon::relation::Index<string, other::Note>();'));
+    assert($out->contains('    function withNotes(function<other::NoteQuery(other::NoteQuery)> $constrain) : S'));
+    assert($out->contains('public class CommentRepository : carbon::Repository<app::Comment, app::CommentQuery, string>, CommentLoading'));
+}
+
+test a_codec_column_is_loaded_and_stored_through_its_codec
+{
+    string $out = emitted(blog());
+    assert($out->contains("        string $r4 = guard $row->text(4) else \{ return .error(.column('tags', carbon::Problem::of($row, 4))); }"));
+    assert($out->contains("        array<string> $c4 = guard app::Csv()->decode($r4) else ($p) \{ return .error(.column('tags', $p)); }"));
+    assert($out->contains('        string $s4 = app::Csv()->encode($m->tags);'));
+    assert($out->contains('    public static hydrahon::Term<string> $tags = carbon::select::column<string>'));
+}
+
+test a_nullable_codec_column_keeps_null_from_its_codec
+{
+    array<string> $more = [
+        field('meta', 3, named('json::Value', ''), tool('codec', 'json'), true),
+        field('extra', 4, optional(named('json::Value', '')), tool('codec', 'json'), true),
+    ];
+    string $out = emitted(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($out->contains("        json::Value $c1 = guard carbon::codec::Json()->decode($r1) else ($p) \{ return .error(.column('meta', $p)); }"));
+    assert($out->contains("        json::Value? $c2 = null;\n        if (!$row->isNull(2)) \{\n            string $r2 = guard $row->text(2)"));
+    assert($out->contains("            json::Value $v2 = guard carbon::codec::Json()->decode($r2) else ($p) \{ return .error(.column('extra', $p)); }"));
+    assert($out->contains('        string $s1 = carbon::codec::Json()->encode($m->meta);'));
+    assert($out->contains("        string? $s2 = null;\n        if ($m->extra != null) \{\n            json::Value $x2 = guard $m->extra;\n            $s2 = carbon::codec::Json()->encode($x2);"));
+    assert($out->contains('    public static hydrahon::Term<string?> $extra = carbon::select::column<string?>'));
+}
+
+test a_declared_query_feeds_the_generated_repository
+{
+    string $query = '{"kind": "struct", "qualified": "app::Posts", "file": "src/t.eco", "line": 50, "tools": [], "fields": [], "conforms": [{"kind": "named", "name": "carbon::Query", "args": [{"kind": "named", "name": "app::Post"}, {"kind": "named", "name": "app::Posts"}]}]}';
+    string $rest = blog();
+    string $out = emitted("{$query}, {$rest}");
+    assert(!$out->contains('public struct PostQuery'));
+    assert($out->contains("public class PostRepository : carbon::Repository<app::Post, app::Posts, int64>, PostLoading\n\{\n    public carbon::Connection $db;\n\n    public function query() : app::Posts\n    \{\n        return app::Posts($this->db);"));
+    assert($out->contains(' * `Posts : carbon::Query<Post, Posts>, PostRelations<Posts>`.'));
+}
+
+test a_table_in_another_database
+{
+    array<string> $f = [field('movieId', 2, prim('int64'), ''), field('genre', 3, TEXT, tool('name', 'genre_name'))];
+    string $pivot = decl('struct', 'app::MovieGenre', 1, both(tool('table', 'movie_genres'), tool('schema', 'catalog')), str::join($f, ', '));
+    string $out = emitted($pivot);
+    assert($out->contains("public class MovieGenreTable : hydrahon::Source\n\{\n    public static hydrahon::Term<int64> $movieId = carbon::select::column<int64>('movie_genres', 'movie_id', $schema: 'catalog');"));
+    assert($out->contains("    public static hydrahon::Term<string> $genre = carbon::select::column<string>('movie_genres', 'genre_name', $schema: 'catalog');"));
+    assert($out->contains("    public static function alias(string $alias, schema: string? $schema = 'catalog') : MovieGenreTableAlias"));
+    // no mapping: a table is no model
+    assert(!$out->contains('carbon::Schema<') && !$out->contains('MovieGenreRows') && !$out->contains('MovieGenreQuery'));
+}

@@ -1,0 +1,54 @@
+namespace carbon::codec;
+
+/**
+ * What the json codecs share: parsing the column, the container they expect, and the
+ * sentence for a value of the wrong kind.
+ */
+internal struct Doc
+{
+    internal static function parse(const string& $raw) : result<json::Value, carbon::Problem>
+    {
+        json::Value $doc = guard json::parse($raw) else ($e) {
+            return .error(.codec("not json: {$e}"));
+        }
+        return .ok($doc);
+    }
+
+    internal static function list(const string& $raw) : result<array<json::Value>, carbon::Problem>
+    {
+        json::Value $doc = guard Doc::parse($raw) else ($p) {
+            return .error($p);
+        }
+        array<json::Value> $items = guard $doc->asArray() else {
+            return .error(.codec('not a json array'));
+        }
+        return .ok(mv $items);
+    }
+
+    internal static function fields(const string& $raw) : result<ordered_map<string, json::Value>, carbon::Problem>
+    {
+        json::Value $doc = guard Doc::parse($raw) else ($p) {
+            return .error($p);
+        }
+        ordered_map<string, json::Value> $fields = guard $doc->asObject() else {
+            return .error(.codec('not a json object'));
+        }
+        return .ok(mv $fields);
+    }
+
+    /**
+     * Array item `$at` (from 0) is not `$what`.
+     */
+    internal static function item(int64 $at, const string& $what) : carbon::Problem
+    {
+        return .codec("item {$at} is not {$what}");
+    }
+
+    /**
+     * Object field `$key` is not `$what`.
+     */
+    internal static function field(const string& $key, const string& $what) : carbon::Problem
+    {
+        return .codec("field {$key} is not {$what}");
+    }
+}

@@ -1,0 +1,33 @@
+namespace carbon::codec;
+
+/**
+ * `array<float64>` as a JSON array: `[1.5]`. An integer is read as its float.
+ */
+public struct JsonFloats : carbon::Codec<array<float64>, string>
+{
+    public const function decode(string $raw) : result<array<float64>, carbon::Problem>
+    {
+        array<json::Value> $items = guard Doc::list($raw) else ($p) {
+            return .error($p);
+        }
+        array<float64> $out = [];
+        int64 $at = 0;
+        foreach ($items as const &$v) {
+            float64 $x = guard $v->asFloat() else {
+                return .error(Doc::item($at, 'a number'));
+            }
+            $out[] = $x;
+            $at = $at + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<float64>& $value) : string
+    {
+        json::Value $doc = json::arr();
+        foreach ($value as const &$x) {
+            $doc[] = json::float($x);
+        }
+        return json::dump($doc);
+    }
+}

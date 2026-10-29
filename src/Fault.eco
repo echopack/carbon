@@ -1,0 +1,39 @@
+namespace carbon;
+
+/**
+ * What a driver reports about a failed statement, sorted so code can react to it without
+ * knowing the database it talks to.
+ */
+public enum Fault : uint8
+{
+    /**
+     * Nothing carbon knows how to name.
+     */
+    case other = 0;
+
+    /**
+     * A unique key or primary key already holds the value.
+     */
+    case duplicate = 1;
+
+    /**
+     * A foreign key points nowhere, or a row that others point to was removed.
+     */
+    case reference = 2;
+
+    /**
+     * Another constraint (NOT NULL, CHECK) refused the row.
+     */
+    case constraint = 3;
+
+    /**
+     * The server picked this transaction as a deadlock victim or a lock wait timed out. Running
+     * the work again can succeed.
+     */
+    case deadlock = 4;
+
+    /**
+     * The connection is gone or never came up.
+     */
+    case connection = 5;
+}

@@ -1,0 +1,135 @@
+namespace carbon;
+
+/**
+ * Everything that can go wrong in carbon. Every fallible call returns `result<T, Error>`, or
+ * `status<Error>` when there is no value.
+ */
+public enum Error
+{
+    /**
+     * hydrahon could not render the statement in the driver's dialect.
+     */
+    case render(hydrahon::Error $error);
+
+    /**
+     * The database refused the statement or the connection failed.
+     */
+    case driver(Failure $failure);
+
+    /**
+     * A lookup that needs a row found none.
+     */
+    case missing;
+
+    /**
+     * The model is not linked to a repository, or the repository is gone.
+     */
+    case detached;
+
+    /**
+     * A column could not be read into its field.
+     */
+    case column(string $name, Problem $problem);
+
+    /**
+     * A repository hook or an observer refused the write, with its reason.
+     */
+    case refused(string $reason);
+
+    /**
+     * A transaction was started inside another one.
+     */
+    case nested;
+
+    /**
+     * A query refused its input, with the reason: a filter that does not parse, an unknown
+     * option.
+     */
+    case invalid(string $reason);
+
+    /**
+     * The model's key changed since it was loaded or last saved. The key names the row, so
+     * carbon refuses to write or delete through it.
+     */
+    case rekeyed;
+
+    /**
+     * `create` was handed a model whose row already exists; `save` writes its changes.
+     */
+    case persisted;
+
+    /**
+     * Whether a unique key refused the write.
+     */
+    public const function duplicate() : bool
+    {
+        return $this->fault() == Fault::duplicate;
+    }
+
+    /**
+     * Whether running the same work again can succeed: a deadlock or a lock wait timeout.
+     */
+    public const function retryable() : bool
+    {
+        return $this->fault() == Fault::deadlock;
+    }
+
+    /**
+     * The driver's fault, or `other` for everything that did not come from the database.
+     */
+    public const function fault() : Fault
+    {
+        return match ($this) {
+            Error::driver($f) => $f->fault,
+            else => Fault::other,
+        };
+    }
+}
+
+namespace str;
+
+/**
+ * A readable message. This is what `"{$e}"` prints.
+ */
+public function from(const carbon::Error& $e) : string
+{
+    match ($e) {
+        carbon::Error::render($r) => {
+            return str::from($r);
+        },
+        carbon::Error::driver($f) => {
+            string? $state = $f->state;
+            if ($state != null) {
+                string $s = guard $state;
+                return "database error [{$s}]: {$f->message}";
+            }
+            return "database error: {$f->message}";
+        },
+        carbon::Error::missing => {
+            return 'no matching row';
+        },
+        carbon::Error::detached => {
+            return 'the model is not linked to a live repository';
+        },
+        carbon::Error::column($name, $problem) => {
+            $why = str::from($problem);
+            return "column {$name} {$why}";
+        },
+        carbon::Error::refused($reason) => {
+            return "refused: {$reason}";
+        },
+        carbon::Error::nested => {
+            return 'a transaction is already open';
+        },
+        carbon::Error::invalid($reason) => {
+            return "invalid: {$reason}";
+        },
+        carbon::Error::rekeyed => {
+            return 'the key changed since the model was loaded';
+        },
+        carbon::Error::persisted => {
+            return 'the model is already stored; save it instead';
+        },
+    };
+    return '';
+}

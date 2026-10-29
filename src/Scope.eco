@@ -1,0 +1,12 @@
+namespace carbon;
+
+/**
+ * Which rows of a model with a soft delete column a query sees: the live ones (the default),
+ * all of them, or only the trashed ones. A model without the column has only live rows.
+ */
+public enum Scope : uint8
+{
+    case live = 0;
+    case all = 1;
+    case trashed = 2;
+}

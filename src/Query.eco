@@ -1,0 +1,446 @@
+namespace carbon;
+
+use carbon::select::Pick;
+
+/**
+ * A query for models `M`: the read side of a model, an immutable value whose methods hand back
+ * a changed copy. `Q` is the query type itself. A conformer is a struct that keeps its `Rows`
+ * and writes `rows()`; everything else here is a default. Scopes are its own methods that
+ * return a narrowed copy, so they chain with each other and with these:
+ *
+ * ```echo
+ * public struct PostQuery : carbon::Query<Post, PostQuery>, PostRelations<PostQuery>
+ * {
+ *     internal PostRows $rows;
+ *
+ *     public constructor(carbon::Connection $db) { $this->rows = PostRows($db); }
+ *     public function rows() : PostRows& { return $this->rows; }
+ *
+ *     public function published() : PostQuery { return $this->where(PostTable::$status == Status::published); }
+ * }
+ *
+ * array<Post> $page = guard $posts->find()->withAuthor()->published()->newest()->page(0, size: 20)->get();
+ * ```
+ *
+ * The generated `PostRelations<PostQuery>` adds a `with…()` method per relation of the model;
+ * carbongen's own queries adopt it on their own, a hand-written one names it.
+ *
+ * A query struct may keep fields of its own (filters to turn into joins, a sort choice); every
+ * copy carries them. Override `apply()` to turn that state into SQL right before the query
+ * runs. A struct that builds itself from a `carbon::Connection` alone, `PostQuery($db)`, is what
+ * carbon builds to find a model's store.
+ */
+public interface Query<M, Q>
+{
+    /**
+     * The repository models of this query link to.
+     */
+    type Repo : class;
+
+    /**
+     * The model's key type, `int64` for an auto increment id.
+     */
+    type Key : contract::comparable<Key>;
+
+    /**
+     * The model's schema: the generated table class, or one written by hand.
+     */
+    type Table : Schema<M, Key, Repo>;
+
+    /**
+     * What this query has gathered so far.
+     */
+    function rows() : Rows<M, Key, Table, Repo>&;
+
+    /**
+     * Add a condition. Conditions are ANDed; `||` inside one ORs.
+     */
+    function where(hydrahon::Term<bool> $condition) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->conditions[] = mv $condition;
+        return $copy;
+    }
+
+    /**
+     * Load `$relation` for every model this query finds, with one more query. The generated
+     * `with…()` methods call this; a relation written by hand is passed here directly.
+     */
+    function with(Eager<M> $relation) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->eager[] = mv $relation;
+        return $copy;
+    }
+
+    /**
+     * Order by `$column`, smallest first, after any order already given.
+     */
+    function order(asc: hydrahon::Order $column) : Q
+    {
+        $column->direction = .asc;
+        return $this->order([mv $column]);
+    }
+
+    /**
+     * Order by `$column`, largest first, after any order already given.
+     */
+    function order(desc: hydrahon::Order $column) : Q
+    {
+        $column->direction = .desc;
+        return $this->order([mv $column]);
+    }
+
+    /**
+     * Order by each of `$by` in turn, after any order already given.
+     */
+    function order(array<hydrahon::Order> $by) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        foreach ($by as const &$o) {
+            $r->orders[] = $o;
+        }
+        return $copy;
+    }
+
+    /**
+     * Newest first: by the created timestamp, or by the key when the model has none.
+     */
+    function newest() : Q
+    {
+        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        return $this->order(desc: $r->store->table->created() ?? $r->store->table->byKey());
+    }
+
+    /**
+     * Oldest first: by the created timestamp, or by the key when the model has none.
+     */
+    function oldest() : Q
+    {
+        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        return $this->order(asc: $r->store->table->created() ?? $r->store->table->byKey());
+    }
+
+    function limit(uint64 $rows) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->take = $rows;
+        return $copy;
+    }
+
+    function offset(uint64 $rows) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->skip = $rows;
+        return $copy;
+    }
+
+    /**
+     * Page `$index` (from 0) of `$size` rows. A page past the end of `uint64` starts past every
+     * row, so an index taken from a request cannot overflow.
+     */
+    function page(uint64 $index, size: uint64 $size) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->take = $size;
+        uint64 $skip = 18446744073709551615;
+        if ($size == 0 || $index <= $skip / $size) {
+            $skip = $index * $size;
+        }
+        $r->skip = $skip;
+        return $copy;
+    }
+
+    /**
+     * See the rows `$scope` names: `.live` (the default), `.all` or `.trashed`. Only a model
+     * with a soft delete column has anything but live rows.
+     */
+    function scope(Scope $scope) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->scope = $scope;
+        return $copy;
+    }
+
+    /**
+     * Join `$source` (a generated table, possibly aliased) on `$on`, keeping only rows with a
+     * match.
+     */
+    function join(inner: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->join(inner: $source->table(), on: $on);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Join `$source` on `$on`, keeping every row of this query.
+     */
+    function join(left: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->join(left: $source->table(), on: $on);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Join `$source` on `$on`, keeping every row of `$source`.
+     */
+    function join(right: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->join(right: $source->table(), on: $on);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Group the rows by `$by`. Counting a grouped query counts its groups.
+     */
+    function group(array<hydrahon::Expr> $by) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->group($by);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Keep only the groups that match `$condition`.
+     */
+    function having(hydrahon::Term<bool> $condition) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->having($condition);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Drop duplicate rows.
+     */
+    function distinct() : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->select->distinct();
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Select a computed field too: `->select(MovieTable::$textTitle->from($t->title))`. The
+     * models this query finds carry it; it is never written back.
+     */
+    function select(Pick $pick) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->selected->picks[] = mv $pick;
+        return $copy;
+    }
+
+    /**
+     * Change the SELECT directly, for what the query does not wrap: unions, CTEs, a cross
+     * join. The columns, conditions, order and paging are applied on top when the query runs.
+     */
+    function adjust(function<void(hydrahon::Select&)> $change) : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $change($r->select);
+        $r->shaped = true;
+        return $copy;
+    }
+
+    /**
+     * Whether a limit or a page is set.
+     */
+    function limited() : bool
+    {
+        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        return $r->take != null;
+    }
+
+    /**
+     * Whether an order is set.
+     */
+    function ordered() : bool
+    {
+        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        return $r->orders->count() > 0;
+    }
+
+    /**
+     * The connection this query runs on.
+     */
+    function connection() : Connection
+    {
+        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        return $r->db;
+    }
+
+    /**
+     * The query as it should run, made once right before any terminal renders it. The default
+     * hands back the query unchanged; a query that keeps state of its own (filters to turn into
+     * joins, a group by that only a limit needs) overrides it. Its error comes back from the
+     * terminal that ran it.
+     */
+    function apply() : result<Q, Error>
+    {
+        Q $copy = $this;
+        return .ok($copy);
+    }
+
+    /**
+     * Every matching model.
+     */
+    function get() : result<array<M>, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->get();
+    }
+
+    /**
+     * The first matching model, null when nothing matches.
+     */
+    function first() : result<M?, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->first();
+    }
+
+    /**
+     * The first matching model, `.missing` when nothing matches.
+     */
+    function one() : result<M, Error>
+    {
+        M? $found = guard $this->first() else ($e) { return .error($e); }
+        M $model = guard $found else { return .error(.missing); }
+        return .ok($model);
+    }
+
+    /**
+     * The matching model with key `$key`, null when there is none.
+     */
+    function get(Key $key) : result<M?, Error>
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->conditions[] = $r->store->table->keyIs($key);
+        return $copy->first();
+    }
+
+    /**
+     * The matching model with key `$key`, `.missing` when there is none.
+     */
+    function one(Key $key) : result<M, Error>
+    {
+        M? $found = guard $this->get($key) else ($e) { return .error($e); }
+        M $model = guard $found else { return .error(.missing); }
+        return .ok($model);
+    }
+
+    /**
+     * The matching models with any of `$keys`, in no particular order. No keys, no query.
+     */
+    function many(const array<Key>& $keys) : result<array<M>, Error>
+    {
+        if ($keys->count() == 0) {
+            array<M> $none = [];
+            return .ok(mv $none);
+        }
+        Q $copy = $this;
+        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        $r->conditions[] = $r->store->table->keyIn($keys);
+        return $copy->get();
+    }
+
+    /**
+     * How many rows match.
+     */
+    function count() : result<uint64, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->count();
+    }
+
+    /**
+     * Whether any row matches. Reads one key, builds no model.
+     */
+    function exists() : result<bool, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->exists();
+    }
+
+    /**
+     * Call `$visit` with each matching model as it is read, without keeping them all. Stops at
+     * the first failure, the visitor's included. Relations named with `with` are not loaded,
+     * since there is no batch to load them for. The rows are still streaming while `$visit`
+     * runs, and a MySQL connection runs nothing else meanwhile: a visitor that writes gets a
+     * driver error. Write from `each(batch:)` instead.
+     */
+    function each(function<status<Error>(M)> $visit) : status<Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->each($visit);
+    }
+
+    /**
+     * Call `$visit` with batches of up to `$size` models, one query per batch, walking the key
+     * upwards; relations named with `with` are loaded for each batch. The query's own order and
+     * paging give way to the key's.
+     */
+    function each(batch: uint64 $size, function<status<Error>(array<M>)> $visit) : status<Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->batches($size, $visit);
+    }
+
+    /**
+     * Set `$values` on every matching row in one statement:
+     * `->update([PostTable::$status => Status::archived])`. Bypasses hooks, observers and
+     * timestamps, since no model is loaded. Answers the affected row count. The statement runs
+     * on the conditions alone: a query with a limit, a page, joins or a group is refused with
+     * `.invalid`.
+     */
+    function update(hydrahon::Values $values) : result<uint64, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->update(mv $values);
+    }
+
+    /**
+     * Remove every matching row for good in one statement, soft delete column or not. Bypasses
+     * hooks and observers. Answers the affected row count. Like `update`, it refuses a query
+     * with a limit, a page, joins or a group.
+     */
+    function purge() : result<uint64, Error>
+    {
+        Q $ready = guard $this->apply() else ($e) { return .error($e); }
+        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        return $r->purge();
+    }
+}

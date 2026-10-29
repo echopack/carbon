@@ -1,0 +1,131 @@
+namespace carbon;
+
+use carbon::change::Changes;
+use carbon::change::Snapshot;
+use carbon::select::Selected;
+
+/**
+ * How one model maps onto its table: the contract between a `Store` and a model type `M` with
+ * key `K`, kept by repository `R`. carbongen writes it from `#[carbon::*]` attributes; it can
+ * just as well be written by hand.
+ *
+ * Columns have fixed positions, the order of `fields()`. `read`, `snapshot` and `write` all
+ * use them.
+ */
+public interface Schema<M, K, R>
+{
+    const function table() : hydrahon::Table;
+
+    /**
+     * The select list, one field per column.
+     */
+    const function fields() : array<hydrahon::Field>;
+
+    /**
+     * The condition that picks the row with key `$key`.
+     */
+    const function keyIs(K $key) : hydrahon::Term<bool>;
+
+    /**
+     * The condition that picks the rows with any of `$keys`.
+     */
+    const function keyIn(const array<K>& $keys) : hydrahon::Term<bool>;
+
+    /**
+     * The condition that picks the rows whose key comes after `$key`, for walking a table in
+     * batches.
+     */
+    const function keyAfter(K $key) : hydrahon::Term<bool>;
+
+    /**
+     * Ascending order on the key.
+     */
+    const function byKey() : hydrahon::Order;
+
+    /**
+     * Ascending order on the created timestamp, null when the model has none. `newest()` and
+     * `oldest()` fall back to the key.
+     */
+    const function created() : hydrahon::Order?
+    {
+        return null;
+    }
+
+    /**
+     * The position of the key in `fields()`.
+     */
+    const function keyAt() : usize;
+
+    /**
+     * Whether the database assigns the key on insert (auto increment, serial).
+     */
+    const function generated() : bool;
+
+    const function keyOf(const M& $model) : K;
+
+    /**
+     * The aliases of the computed fields, in the order `read` asks `Selected::slot` for them.
+     * None by default.
+     */
+    const function computed() : array<string>
+    {
+        array<string> $none = [];
+        return $none;
+    }
+
+    /**
+     * Build a model from the cursor's current row. The columns come first, in `fields()`
+     * order; the computed fields `$extra` placed follow them.
+     */
+    const function read(const Cursor& $row, const Selected& $extra) : result<M, Error>;
+
+    /**
+     * The model's column values in field order.
+     */
+    const function snapshot(const M& $model) : Snapshot;
+
+    /**
+     * The model's column values in field order, as a row a driver would answer with. A test
+     * hands it to a fake: `$fake->rows([$t->row(Post($id: 1, $title: 'Hello'))])`.
+     */
+    const function row(const M& $model) : array<hydrahon::Value>
+    {
+        return $this->snapshot($model)->values;
+    }
+
+    /**
+     * Write the columns marked in `$only` into `$into`.
+     */
+    const function write(const M& $model, const Changes& $only, hydrahon::Values& $into) : void;
+
+    /**
+     * Take the key the database generated. Only called when `generated()`.
+     */
+    const function inserted(M& $model, int64 $key) : void;
+
+    /**
+     * Where the model keeps its link.
+     */
+    const function link(M& $model) : Link<R>&;
+
+    /**
+     * Set the created and updated timestamps for `$event`, if the model has them.
+     */
+    const function stamp(M& $model, Event $event, hydrahon::DateTime $now) : void;
+
+    /**
+     * Set the soft delete timestamp (null restores). False when the model has none.
+     */
+    const function trash(M& $model, hydrahon::DateTime? $at) : bool;
+
+    /**
+     * The soft delete timestamp, null when the model is live or has no soft delete column. A
+     * delete or restore that fails puts it back with `trash`.
+     */
+    const function trashed(const M& $model) : hydrahon::DateTime?;
+
+    /**
+     * The condition that hides soft deleted rows, or null when the model has none.
+     */
+    const function live() : hydrahon::Term<bool>?;
+}

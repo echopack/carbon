@@ -1,0 +1,32 @@
+namespace fixtures;
+
+/**
+ * Everything a test needs: the fake, the Db and its four registered repositories, on a fixed
+ * clock at 2023-11-14 22:13:20 UTC.
+ */
+public class World
+{
+    public carbon::fake::Driver<hydrahon::Mysql> $fake;
+    public carbon::Db $db;
+    public carbon::clock::Fixed $clock;
+    public NoteRepository $notes;
+    public TagRepository $tags;
+    public SettingRepository $settings;
+    public ProfileRepository $profiles;
+
+    public constructor()
+    {
+        $this->fake = carbon::fake::Driver<hydrahon::Mysql>();
+        $this->clock = carbon::clock::Fixed(unix: 1700000000);
+        $this->db = carbon::Db($this->fake, clock: $this->clock);
+        $this->db->register(NoteRepository($this->db->connection()));
+        $this->db->register(TagRepository($this->db->connection()));
+        $this->db->register(SettingRepository($this->db->connection()));
+        $this->db->register(ProfileRepository($this->db->connection()));
+        $this->notes = $this->db->repo<NoteRepository>();
+        $this->tags = $this->db->repo<TagRepository>();
+        $this->settings = $this->db->repo<SettingRepository>();
+        $this->profiles = $this->db->repo<ProfileRepository>();
+    }
+}
+

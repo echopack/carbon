@@ -1,0 +1,43 @@
+namespace carbon;
+
+/**
+ * A slot for many related models (has many). A loader fills it; reading it never runs a
+ * query, so an unloaded slot is simply empty.
+ */
+public struct Many<T>
+{
+    internal array<T> $items;
+    internal bool $loaded;
+
+    public constructor()
+    {
+        $this->items = [];
+        $this->loaded = false;
+    }
+
+    public static function unloaded() : Many<T>
+    {
+        return Many<T>();
+    }
+
+    public const function get() : const array<T>&
+    {
+        return $this->items;
+    }
+
+    public const function count() : usize
+    {
+        return $this->items->count();
+    }
+
+    public const function loaded() : bool
+    {
+        return $this->loaded;
+    }
+
+    public function set(array<T> $items) : void
+    {
+        $this->items = mv $items;
+        $this->loaded = true;
+    }
+}

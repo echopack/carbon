@@ -1,0 +1,10 @@
+namespace carbon::select;
+
+/**
+ * A slot and the term that fills it, for `select`.
+ */
+public struct Pick
+{
+    public string $alias;
+    public hydrahon::Field $field;
+}

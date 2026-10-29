@@ -1,0 +1,94 @@
+namespace carbon::codec;
+
+/**
+ * `array<string>` as one comma separated record: `a,b,c`. An item holding a comma, a quote
+ * or a line break is quoted the CSV way (`"a,b"`, `""` for a quote inside), so every array
+ * comes back as it went in. No items is the empty string; one empty item is `""`.
+ *
+ * ```echo
+ * #[carbon::codec: 'csv']
+ * public array<string> $tags = [];
+ * ```
+ */
+public struct Csv : carbon::Codec<array<string>, string>
+{
+    public const function decode(string $raw) : result<array<string>, carbon::Problem>
+    {
+        array<string> $out = [];
+        if ($raw->empty()) {
+            return .ok(mv $out);
+        }
+        usize $n = $raw->size();
+        usize $i = 0;
+        while (true) {
+            string $item = '';
+            if ($i < $n && $raw->byte($i) == 34) {
+                $i = $i + 1;
+                bool $closed = false;
+                while ($i < $n) {
+                    usize $q = $raw->find('"', $i);
+                    if ($q == $n) {
+                        break;
+                    }
+                    $item->append($raw->sub($i, $q - $i));
+                    if ($q + 1 < $n && $raw->byte($q + 1) == 34) {
+                        $item->append('"');
+                        $i = $q + 2;
+                        continue;
+                    }
+                    $i = $q + 1;
+                    $closed = true;
+                    break;
+                }
+                if (!$closed) {
+                    return .error(.codec('a quote is never closed'));
+                }
+                if ($i < $n && $raw->byte($i) != 44) {
+                    return .error(.codec('text after a closing quote'));
+                }
+            } else {
+                usize $comma = $raw->find(',', $i);
+                $item->append($raw->sub($i, $comma - $i));
+                if ($item->contains('"')) {
+                    return .error(.codec('a quote inside an unquoted item'));
+                }
+                $i = $comma;
+            }
+            $out[] = $item;
+            if ($i >= $n) {
+                break;
+            }
+            $i = $i + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<string>& $value) : string
+    {
+        if ($value->count() == 1 && $value[0]->empty()) {
+            return '""';
+        }
+        string $out = '';
+        foreach ($value as $i => const &$item) {
+            if ($i > 0) {
+                $out->append(',');
+            }
+            if (!Csv::plain($item)) {
+                $out->append('"');
+                $out->append(str::replace($item, '"', '""'));
+                $out->append('"');
+                continue;
+            }
+            $out->append($item);
+        }
+        return $out;
+    }
+
+    /**
+     * Whether `$item` can be written without quotes.
+     */
+    internal static function plain(const string& $item) : bool
+    {
+        return !$item->contains(',') && !$item->contains('"') && !$item->contains("\r") && !$item->contains("\n");
+    }
+}

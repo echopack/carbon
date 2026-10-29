@@ -1,0 +1,72 @@
+namespace carbongen;
+
+/**
+ * The codecs carbon brings, by the name `#[carbon::codec]` gives them. carbongen only reads
+ * the module it generates for, never carbon itself, so they are listed here: each name, the
+ * field types it stores, and the `carbon::codec` type for each. All of them store text.
+ */
+public struct Codecs
+{
+    /**
+     * Whether `$name` is one of carbon's codecs.
+     */
+    public static function known(const string& $name) : bool
+    {
+        return $name == 'json' || $name == 'csv' || $name == 'lines';
+    }
+
+    /**
+     * carbon's codec `$name` for a field of type `$type`, or empty when it stores no such type.
+     */
+    public static function builtin(const string& $name, const string& $type) : string
+    {
+        if ($name == 'csv' && $type == 'array<string>') {
+            return 'carbon::codec::Csv';
+        }
+        if ($name == 'lines' && $type == 'array<string>') {
+            return 'carbon::codec::Lines';
+        }
+        if ($name != 'json') {
+            return '';
+        }
+        if ($type == 'json::Value') {
+            return 'carbon::codec::Json';
+        }
+        if ($type == 'array<string>') {
+            return 'carbon::codec::JsonStrings';
+        }
+        if ($type == 'array<int64>') {
+            return 'carbon::codec::JsonInts';
+        }
+        if ($type == 'array<float64>') {
+            return 'carbon::codec::JsonFloats';
+        }
+        if ($type == 'array<bool>') {
+            return 'carbon::codec::JsonBools';
+        }
+        if ($type == 'map<string, string>') {
+            return 'carbon::codec::JsonStringMap';
+        }
+        if ($type == 'map<string, int64>') {
+            return 'carbon::codec::JsonIntMap';
+        }
+        if ($type == 'map<string, float64>') {
+            return 'carbon::codec::JsonFloatMap';
+        }
+        if ($type == 'map<string, bool>') {
+            return 'carbon::codec::JsonBoolMap';
+        }
+        return '';
+    }
+
+    /**
+     * The field types carbon's codec `$name` stores, for a problem.
+     */
+    public static function stores(const string& $name) : string
+    {
+        if ($name == 'json') {
+            return 'json::Value, array<string|int64|float64|bool> or map<string, string|int64|float64|bool>';
+        }
+        return 'array<string>';
+    }
+}

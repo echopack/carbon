@@ -1,0 +1,58 @@
+namespace fixtures;
+
+public struct NoteQuery : carbon::Query<Note, NoteQuery>, NoteRelations<NoteQuery>
+{
+    internal NoteRows $rows;
+
+    /**
+     * How many times `apply` ran, to hold it to once per terminal.
+     */
+    internal Trail $applied = Trail();
+    internal bool $refuse = false;
+
+    public constructor(carbon::Connection $db)
+    {
+        $this->rows = NoteRows($db);
+    }
+
+    public function rows() : NoteRows&
+    {
+        return $this->rows;
+    }
+
+    /**
+     * Scope: pinned notes.
+     */
+    public function pinned() : NoteQuery
+    {
+        return $this->where(NoteTable::$pinned);
+    }
+
+    /**
+     * Scope: notes in a mood.
+     */
+    public function feeling(Mood $mood) : NoteQuery
+    {
+        return $this->where(NoteTable::$mood == $mood);
+    }
+
+    /**
+     * State of its own, turned into SQL in `apply`: refuse to run.
+     */
+    public function refusing() : NoteQuery
+    {
+        NoteQuery $q = $this;
+        $q->refuse = true;
+        return $q;
+    }
+
+    public function apply() : result<NoteQuery, carbon::Error>
+    {
+        $this->applied->heard[] = 'apply';
+        if ($this->refuse) {
+            return .error(.invalid('told to refuse'));
+        }
+        NoteQuery $q = $this;
+        return .ok($q);
+    }
+}

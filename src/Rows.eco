@@ -1,0 +1,256 @@
+namespace carbon;
+
+use carbon::select::Selected;
+
+/**
+ * Everything a query has gathered: its store, conditions, order, paging, joins and the rest of
+ * the SELECT, the soft delete scope, the computed fields it selects and the relations it loads.
+ * A value: copying it copies the query. A query struct keeps one and hands it out through
+ * `Query::rows()`; carbongen writes the alias, `PostRows`.
+ */
+public struct Rows<M, K, S, R>
+{
+    internal Connection $db;
+    internal Store<M, K, S, R> $store;
+    internal hydrahon::Select $select;
+    internal array<hydrahon::Term<bool>> $conditions = [];
+    internal array<hydrahon::Order> $orders = [];
+    internal uint64? $take = null;
+    internal uint64? $skip = null;
+    internal Scope $scope = .live;
+    internal array<Eager<M>> $eager = [];
+    internal Selected $selected = Selected();
+
+    /**
+     * Whether a join, group, having, distinct or `adjust` changed the SELECT beyond its
+     * conditions, which a bulk UPDATE or DELETE cannot carry.
+     */
+    internal bool $shaped = false;
+
+    /**
+     * Every live row of `M` on `$db`.
+     */
+    public constructor(Connection $db)
+    {
+        $this->db = $db;
+        $this->store = $db->store<M, K, S, R>();
+        $this->select = hydrahon::Select(from: $this->store->table->table());
+    }
+
+    /**
+     * Every matching model, relations loaded.
+     */
+    internal function get() : result<array<M>, Error>
+    {
+        hydrahon::Select $q = $this->finish();
+        return $this->run($q);
+    }
+
+    /**
+     * The first matching model, null when nothing matches.
+     */
+    internal function first() : result<M?, Error>
+    {
+        hydrahon::Select $q = $this->finish();
+        $q->limit(1);
+        array<M> $found = guard $this->run($q) else ($e) { return .error($e); }
+        if ($found->count() == 0) {
+            return .ok(null);
+        }
+        M $model = $found[0];
+        return .ok($model);
+    }
+
+    /**
+     * How many rows match. A grouped query counts its groups.
+     */
+    internal function count() : result<uint64, Error>
+    {
+        hydrahon::Select $q = $this->finish()->count();
+        Cursor $rows = guard $this->db->query($q) else ($e) { return .error($e); }
+        bool $one = guard $rows->step() else ($e) { return .error($e); }
+        if (!$one) {
+            return .ok(0);
+        }
+        int64 $n = guard $rows->int(0) else { return .error(.column('count', Problem::of($rows, 0))); }
+        return .ok($n as uint64);
+    }
+
+    /**
+     * Whether any row matches. Reads one key, builds no model.
+     */
+    internal function exists() : result<bool, Error>
+    {
+        array<hydrahon::Field> $fields = $this->store->table->fields();
+        array<hydrahon::Field> $key = [$fields[$this->store->table->keyAt()]];
+        hydrahon::Select $q = $this->build($key);
+        $q->limit(1);
+        Cursor $rows = guard $this->db->query($q) else ($e) { return .error($e); }
+        return $rows->step();
+    }
+
+    /**
+     * Call `$visit` with each matching model as it is read, without keeping them all.
+     */
+    internal function each(function<status<Error>(M)> $visit) : status<Error>
+    {
+        hydrahon::Select $q = $this->finish();
+        Cursor $rows = guard $this->db->query($q) else ($e) { return .error($e); }
+        while (true) {
+            bool $more = guard $rows->step() else ($e) { return .error($e); }
+            if (!$more) {
+                break;
+            }
+            M $model = guard $this->store->table->read($rows, $this->selected) else ($e) { return .error($e); }
+            $this->store->settle($model);
+            guard $visit($model) else ($e) { return .error($e); }
+        }
+        return .ok();
+    }
+
+    /**
+     * Call `$visit` with batches of up to `$size` models, walking the key upwards: one query per
+     * batch, relations loaded for each. The query's own order and paging give way to the key's.
+     */
+    internal function batches(uint64 $size, function<status<Error>(array<M>)> $visit) : status<Error>
+    {
+        Rows<M, K, S, R> $page = $this;
+        $page->orders = [$this->store->table->byKey()];
+        $page->take = $size;
+        $page->skip = null;
+        K? $after = null;
+        while (true) {
+            if ($after != null) {
+                K $last = guard $after;
+                $page->conditions = $this->conditions;
+                $page->conditions[] = $this->store->table->keyAfter($last);
+            }
+            array<M> $found = guard $page->get() else ($e) { return .error($e); }
+            usize $n = $found->count();
+            if ($n == 0) {
+                return .ok();
+            }
+            K $tail = $this->store->table->keyOf($found[$n - 1]);
+            guard $visit(mv $found) else ($e) { return .error($e); }
+            if (($n as uint64) < $size) {
+                return .ok();
+            }
+            $after = $tail;
+        }
+        return .ok();
+    }
+
+    /**
+     * Set `$values` on every matching row in one statement. Bypasses hooks, observers and
+     * timestamps, since no model is loaded. Answers the affected row count.
+     */
+    internal function update(hydrahon::Values $values) : result<uint64, Error>
+    {
+        guard $this->plain('update') else ($e) { return .error($e); }
+        hydrahon::Update $q = hydrahon::Update($this->store->table->table());
+        $q->set(mv $values);
+        foreach ($this->terms() as const &$c) {
+            $q->where($c);
+        }
+        Written $w = guard $this->db->exec($q) else ($e) { return .error($e); }
+        return .ok($w->affected);
+    }
+
+    /**
+     * Remove every matching row for good in one statement, soft delete column or not. Bypasses
+     * hooks and observers. Answers the affected row count.
+     */
+    internal function purge() : result<uint64, Error>
+    {
+        guard $this->plain('purge') else ($e) { return .error($e); }
+        hydrahon::Delete $q = hydrahon::Delete(from: $this->store->table->table());
+        foreach ($this->terms() as const &$c) {
+            $q->where($c);
+        }
+        Written $w = guard $this->db->exec($q) else ($e) { return .error($e); }
+        return .ok($w->affected);
+    }
+
+    /**
+     * Refuse a bulk write the query's shape cannot carry. An UPDATE or DELETE runs on the
+     * conditions alone, so a limit, an offset, a join or a group would be dropped and the
+     * statement would touch other rows than the query selects. An order alone is harmless.
+     */
+    internal const function plain(const string& $what) : status<Error>
+    {
+        if ($this->take != null || $this->skip != null) {
+            return .error(.invalid("{$what} runs on the conditions alone, not on a limit or a page; load the models instead"));
+        }
+        if ($this->shaped) {
+            return .error(.invalid("{$what} runs on the conditions alone, not on joins, groups or an adjusted select"));
+        }
+        return .ok();
+    }
+
+    /**
+     * The SELECT as it will run: every column and computed field, conditions, order, paging
+     * and the soft delete scope applied.
+     */
+    internal function finish() : hydrahon::Select
+    {
+        array<hydrahon::Field> $fields = $this->store->table->fields();
+        $this->selected->place($this->store->table->computed(), $fields->count());
+        foreach ($this->selected->picks as const &$p) {
+            $fields[] = $p->field;
+        }
+        return $this->build($fields);
+    }
+
+    internal function run(const hydrahon::Select& $q) : result<array<M>, Error>
+    {
+        Cursor $rows = guard $this->db->query($q) else ($e) { return .error($e); }
+        array<M> $found = guard $this->store->load($rows, $this->selected) else ($e) { return .error($e); }
+        if ($found->count() > 0) {
+            foreach ($this->eager as &$e) {
+                guard $e->load($found, $this->db) else ($err) { return .error($err); }
+            }
+        }
+        return .ok(mv $found);
+    }
+
+    internal function build(array<hydrahon::Field> $fields) : hydrahon::Select
+    {
+        hydrahon::Select $q = $this->select;
+        $q->fields(mv $fields);
+        foreach ($this->terms() as const &$c) {
+            $q->where($c);
+        }
+        if ($this->orders->count() > 0) {
+            $q->order($this->orders);
+        }
+        uint64? $take = $this->take;
+        if ($take != null) {
+            uint64 $t = guard $take;
+            $q->limit($t);
+        }
+        uint64? $skip = $this->skip;
+        if ($skip != null) {
+            uint64 $s = guard $skip;
+            $q->offset($s);
+        }
+        return $q;
+    }
+
+    /**
+     * Every condition, the soft delete scope included. A statement ANDs them.
+     */
+    internal function terms() : array<hydrahon::Term<bool>>
+    {
+        array<hydrahon::Term<bool>> $all = $this->conditions;
+        hydrahon::Term<bool>? $live = $this->store->table->live();
+        if ($live != null) {
+            hydrahon::Term<bool> $l = guard $live;
+            if ($this->scope == Scope::live) {
+                $all[] = $l;
+            } else if ($this->scope == Scope::trashed) {
+                $all[] = !$l;
+            }
+        }
+        return $all;
+    }
+}

@@ -1,0 +1,11 @@
+namespace blog;
+
+/**
+ * Where a post is in its life.
+ */
+public enum Status : uint8
+{
+    case draft = 0;
+    case published = 1;
+    case archived = 2;
+}

@@ -1,0 +1,41 @@
+namespace blog;
+
+#[carbon::model: 'posts']
+public class Post : carbon::Model<Post, PostRepository>
+{
+    public carbon::Link<PostRepository> $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+    public int64 $authorId;
+    public string $title;
+    public string? $body = null;
+    public Status $status = .draft;
+    public int32 $views = 0;
+
+    #[carbon::codec: 'csv']
+    public array<string> $tags = [];
+
+    #[carbon::codec: 'json']
+    public json::Value $meta = json::object();
+
+    #[carbon::created]
+    public hydrahon::DateTime? $createdAt = null;
+
+    #[carbon::updated]
+    public hydrahon::DateTime? $updatedAt = null;
+
+    #[carbon::deleted]
+    public hydrahon::DateTime? $deletedAt = null;
+
+    #[carbon::belongsTo: 'authorId']
+    public carbon::One<User> $author = .unloaded();
+
+    #[carbon::hasMany: 'postId']
+    public carbon::Many<Comment> $comments = .unloaded();
+
+    public function link() : carbon::Link<PostRepository>&
+    {
+        return $this->link;
+    }
+}

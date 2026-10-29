@@ -1,0 +1,201 @@
+namespace carbongen;
+
+/**
+ * One model to generate a table for.
+ */
+public struct Model
+{
+    public string $qualified;
+    public string $table;
+    public string $schema;
+    public string $repository;
+    public string $linkField;
+    public array<Column> $columns;
+    public usize $keyAt;
+    public bool $generated;
+    public array<string> $created;
+    public array<string> $updated;
+    public string $deleted;
+    public array<Relation> $relations;
+
+    /**
+     * The query type: the module's struct conforming to `carbon::Query<Model, …>`, or the one
+     * carbongen writes, `PostQuery`.
+     */
+    public string $query = '';
+    public bool $queryDeclared = false;
+    public bool $repositoryDeclared = false;
+
+    /**
+     * The `#[carbon::computed]` fields: selected on demand, never written.
+     */
+    public array<Column> $computed = [];
+
+    /**
+     * A `#[carbon::table]`: columns to join and select, no model, key or repository.
+     */
+    public bool $bare = false;
+
+    public const function space() : string
+    {
+        return Names::space($this->qualified);
+    }
+
+    /**
+     * The generated class: `blog::Post` gets `PostTable`.
+     */
+    public const function handle() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Table";
+    }
+
+    /**
+     * The class of the table under an alias: `blog::Post` gets `PostTableAlias`.
+     */
+    public const function aliasClass() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}TableAlias";
+    }
+
+    /**
+     * The handle, qualified the way the model is.
+     */
+    public const function qualifiedHandle() : string
+    {
+        return $this->qualify($this->handle());
+    }
+
+    /**
+     * The alias of the model's query state: `blog::Post` gets `PostRows`.
+     */
+    public const function rowsAlias() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Rows";
+    }
+
+    /**
+     * The name of the query carbongen writes when the module declares none: `blog::Post`
+     * gets `PostQuery`.
+     */
+    public const function queryStruct() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Query";
+    }
+
+    /**
+     * The name of the repository carbongen writes when the module declares none: `blog::Post`
+     * gets `PostRepository`.
+     */
+    public const function repositoryAlias() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Repository";
+    }
+
+    /**
+     * The model's `#[carbon::schema]` as Echo source, `'cache'`, or `null` when it has none.
+     */
+    public const function schemaLiteral() : string
+    {
+        if ($this->schema->size() == 0) {
+            return 'null';
+        }
+        return "'{$this->schema}'";
+    }
+
+    /**
+     * `$name` in the model's namespace.
+     */
+    public const function qualify(const string& $name) : string
+    {
+        string $space = $this->space();
+        if ($space->size() == 0) {
+            return $name;
+        }
+        return "{$space}::{$name}";
+    }
+
+    public const function key() : const Column&
+    {
+        return $this->columns[$this->keyAt];
+    }
+
+    /**
+     * The type arguments of the model's `carbon::Rows`: model, key, table, repository.
+     */
+    public const function rowsArgs() : string
+    {
+        string $handle = $this->qualifiedHandle();
+        string $key = $this->key()->field();
+        return "{$this->qualified}, {$key}, {$handle}, {$this->repository}";
+    }
+
+    /**
+     * The generated class of relation `$r`: `author` of `blog::Post` gets `PostAuthorRelation`.
+     */
+    public const function relationClass(const Relation& $r) : string
+    {
+        $local = Names::local($this->qualified);
+        $name = Names::pascal($r->property);
+        return "{$local}{$name}Relation";
+    }
+
+    /**
+     * The `with…()` method of relation `$r`: `author` gets `withAuthor`.
+     */
+    public const function relationMethod(const Relation& $r) : string
+    {
+        $name = Names::pascal($r->property);
+        return "with{$name}";
+    }
+
+    /**
+     * The interface of the model's `with…()` methods: `blog::Post` gets `PostRelations`.
+     */
+    public const function relationsInterface() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Relations";
+    }
+
+    /**
+     * What a repository's `load()` hands back: `blog::Post` gets `PostLoad`.
+     */
+    public const function loadStruct() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Load";
+    }
+
+    /**
+     * The interface that gives a repository `load()`: `blog::Post` gets `PostLoading`.
+     */
+    public const function loadingInterface() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Loading";
+    }
+
+    public const function column(const string& $property) : Column?
+    {
+        foreach ($this->columns as const &$c) {
+            if ($c->property == $property) {
+                return $c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether `$r` belongs to its target through a nullable key, so a model may have none.
+     */
+    public const function optional(const Relation& $r) : bool
+    {
+        Column $fk = guard $this->column($r->foreign) else { return false; }
+        return $r->direction == Direction::belongsTo && $fk->nullable;
+    }
+}

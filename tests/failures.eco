@@ -1,0 +1,258 @@
+use carbon::{Error, Event};
+use hydrahon::{Value, DateTime};
+use fixtures::{World, Note, Tag, Setting, noteRow, tagRow, failure, message, selectNotes};
+
+test a_failed_soft_delete_leaves_the_model_live
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'Bin')])->fails(failure(.deadlock));
+    Note $n = guard $w->notes->find()->one(4);
+    status<Error> $s = $n->delete();
+    assert($s->failure()->retryable());
+    assert($n->deletedAt == null);
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 2');
+    // the next save writes what changed, and does not delete the row on the way
+    $w->fake->written(1);
+    $n->title = 'Kept';
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+}
+
+test a_failed_restore_leaves_the_model_trashed
+{
+    $w = World();
+    array<Value> $row = noteRow(4, 'Bin');
+    DateTime $gone = DateTime(2023, 1, 1, 0, 0, 0);
+    $row[7] = Value::from($gone);
+    $w->fake->rows([$row])->fails(failure(.connection));
+    Note $n = guard $w->notes->find()->scope(.trashed)->one(4);
+    status<Error> $s = $n->restore();
+    assert($s->failed());
+    DateTime $still = guard $n->deletedAt;
+    assert($still->year == 2023);
+    $w->fake->written(1);
+    $n->title = 'Kept';
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+}
+
+test a_failed_update_keeps_the_changes_to_write_again
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Before')])->fails(failure(.deadlock))->written(1);
+    Note $n = guard $w->notes->find()->one(3);
+    $n->title = 'After';
+    status<Error> $s = $n->save();
+    assert($s->failure()->retryable());
+    assert($n->dirty());
+    // no after hook for a write that did not happen
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 1');
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+    assert(!$n->dirty());
+}
+
+test a_failed_purge_keeps_the_row
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'Stay')])->fails(failure(.reference));
+    Note $n = guard $w->notes->find()->one(4);
+    status<Error> $s = $n->purge();
+    assert($s->failure()->fault() == carbon::Fault::reference);
+    assert($n->persisted());
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 2');
+}
+
+test writes_need_a_stored_model
+{
+    $w = World();
+    Note $n = Note($title: 'New');
+    $w->notes->attach($n);
+    assert(message($w->notes->delete($n)) == 'no matching row');
+    assert(message($w->notes->restore($n)) == 'no matching row');
+    assert(message($w->notes->purge($n)) == 'no matching row');
+    // a hard deleting model has nothing to restore
+    $w->fake->rows([tagRow(8, 1, 'red')]);
+    Tag $t = guard $w->tags->find()->one(8);
+    assert(message($t->restore()) == 'no matching row');
+    assert($w->fake->count() == 1);
+    assert($w->notes->trail->heard->count() == 0);
+}
+
+test a_changed_key_refuses_every_write
+{
+    $w = World();
+    $w->fake->rows([noteRow(4, 'Moved')]);
+    Note $n = guard $w->notes->find()->one(4);
+    $n->id = 5;
+    assert(message($n->save()) == 'the key changed since the model was loaded');
+    assert(message($n->delete()) == 'the key changed since the model was loaded');
+    assert(message($n->restore()) == 'the key changed since the model was loaded');
+    assert(message($n->purge()) == 'the key changed since the model was loaded');
+    assert($w->fake->count() == 1);
+    // refused before any hook ran
+    assert($w->notes->trail->heard->count() == 0);
+}
+
+test a_refused_delete_writes_nothing
+{
+    $w = World();
+    $w->notes->observe(Refuser());
+    $w->fake->rows([noteRow(4, 'Bin')]);
+    Note $n = guard $w->notes->find()->one(4);
+    assert(message($n->delete()) == 'refused: not today');
+    assert($n->deletedAt == null);
+    assert(message($n->purge()) == 'refused: not today');
+    assert($n->persisted());
+    assert($w->fake->count() == 1);
+}
+
+test detached_models_answer_detached
+{
+    Note $n = Note($title: 'Loose');
+    assert(message($n->delete()) == 'the model is not linked to a live repository');
+    assert(message($n->restore()) == 'the model is not linked to a live repository');
+    assert(message($n->purge()) == 'the model is not linked to a live repository');
+    result<Note, Error> $f = $n->fresh();
+    assert(str::from($f->failure()) == 'the model is not linked to a live repository');
+    // nothing to differ from, and no row
+    assert(!$n->dirty());
+    assert(!$n->persisted());
+    assert(!$n->link->attached());
+}
+
+test an_insert_on_postgres_without_a_returned_row_is_missing
+{
+    $fake = carbon::fake::Driver<hydrahon::Postgres>();
+    $fake->rows([])->rows([[Value::from('seven')]]);
+    carbon::Db $db = carbon::Db($fake);
+    $db->register(fixtures::NoteRepository($db->connection()));
+    fixtures::NoteRepository $notes = $db->repo<fixtures::NoteRepository>();
+    result<Note, Error> $none = $notes->create(Note($title: 'Pg'));
+    assert(str::from($none->failure()) == 'no matching row');
+    Note $n = Note($title: 'Pg');
+    $notes->attach($n);
+    status<Error> $odd = $n->save();
+    assert(message($odd) == 'column key holds another kind of value than the field');
+    assert(!$n->persisted());
+}
+
+test a_failed_insert_runs_no_after_hook
+{
+    $w = World();
+    $w->fake->fails(failure(.duplicate));
+    result<Note, Error> $r = $w->notes->create(Note($title: 'Dup'));
+    assert($r->failure()->duplicate());
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0');
+}
+
+test reading_stops_at_a_failing_cursor
+{
+    $w = World();
+    $w->fake->fails(failure(.connection));
+    result<array<Note>, Error> $r = $w->notes->all();
+    assert($r->failure()->fault() == carbon::Fault::connection);
+    $w->fake->fails(failure(.connection));
+    result<uint64, Error> $c = $w->notes->count();
+    assert($c->failed());
+    $w->fake->fails(failure(.connection));
+    result<bool, Error> $e = $w->notes->exists();
+    assert($e->failed());
+    $w->fake->fails(failure(.connection));
+    status<Error> $each = $w->notes->each(function(Note $n) : status<Error> { return .ok(); });
+    assert($each->failed());
+    $w->fake->fails(failure(.connection));
+    result<uint64, Error> $u = $w->notes->find()->update([fixtures::NoteTable::$pinned => true]);
+    assert($u->failed());
+    $w->fake->fails(failure(.connection));
+    result<uint64, Error> $p = $w->notes->find()->purge();
+    assert($p->failed());
+}
+
+test a_bad_row_stops_each_and_batches
+{
+    $w = World();
+    array<Value> $bad = noteRow(2, 'b');
+    $bad[1] = Value::none;
+    $w->fake->rows([noteRow(1, 'a'), $bad]);
+    Visits $seen = Visits();
+    status<Error> $s = $w->notes->each(function[$seen](Note $n) : status<Error> {
+        $seen->count = $seen->count + 1;
+        return .ok();
+    });
+    assert(message($s) == 'column title is NULL but the field is not nullable');
+    assert($seen->count == 1);
+    $w->fake->rows([noteRow(1, 'a'), $bad]);
+    status<Error> $b = $w->notes->each(batch: 5, function[$seen](array<Note> $batch) : status<Error> {
+        $seen->count = $seen->count + 1;
+        return .ok();
+    });
+    assert($b->failed());
+    assert($seen->count == 1);
+}
+
+test a_count_that_is_no_number_is_a_column_error
+{
+    $w = World();
+    $w->fake->rows([[Value::from('many')]])->rows([]);
+    result<uint64, Error> $c = $w->notes->count();
+    assert(str::from($c->failure()) == 'column count holds another kind of value than the field');
+    // no row at all counts nothing
+    uint64 $n = guard $w->notes->count();
+    assert($n == 0);
+}
+
+/**
+ * Refuses every delete.
+ */
+class Refuser : carbon::Observer<Note>
+{
+    public function before(Event $event, Note& $model) : status<Error>
+    {
+        if ($event == Event::deleting) {
+            return .error(.refused('not today'));
+        }
+        return .ok();
+    }
+
+    public function after(Event $event, const Note& $model) : void
+    {
+    }
+}
+
+/**
+ * How often a visitor ran.
+ */
+class Visits
+{
+    public int32 $count = 0;
+}
+
+/**
+ * Lowercases setting names on every write: a hook that touches the key.
+ */
+class Lowercase : carbon::Observer<Setting>
+{
+    public function before(Event $event, Setting& $model) : status<Error>
+    {
+        $model->name = str::lower($model->name);
+        return .ok();
+    }
+
+    public function after(Event $event, const Setting& $model) : void
+    {
+    }
+}
+
+test a_hook_that_changes_the_key_is_refused
+{
+    $w = World();
+    $w->fake->rows([[Value::from('Theme'), Value::from('dark')]]);
+    Setting $s = guard $w->settings->find()->one('Theme');
+    $w->settings->observe(Lowercase());
+    $s->value = 'light';
+    // writing through the new key would update row theme, not row Theme
+    assert(message($s->save()) == 'the key changed since the model was loaded');
+    assert(message($w->settings->purge($s)) == 'the key changed since the model was loaded');
+    assert($w->fake->count() == 1);
+}

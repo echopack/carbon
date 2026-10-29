@@ -1,0 +1,33 @@
+namespace carbon::codec;
+
+/**
+ * `array<string>` as a JSON array: `['a']`.
+ */
+public struct JsonStrings : carbon::Codec<array<string>, string>
+{
+    public const function decode(string $raw) : result<array<string>, carbon::Problem>
+    {
+        array<json::Value> $items = guard Doc::list($raw) else ($p) {
+            return .error($p);
+        }
+        array<string> $out = [];
+        int64 $at = 0;
+        foreach ($items as const &$v) {
+            string $x = guard $v->asStr() else {
+                return .error(Doc::item($at, 'a string'));
+            }
+            $out[] = $x;
+            $at = $at + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<string>& $value) : string
+    {
+        json::Value $doc = json::arr();
+        foreach ($value as const &$x) {
+            $doc[] = json::str($x);
+        }
+        return json::dump($doc);
+    }
+}

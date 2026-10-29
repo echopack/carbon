@@ -1,0 +1,35 @@
+namespace carbon::codec;
+
+/**
+ * `map<string, int64>` as a JSON object: `{"k":1}`, keys in sorted order so the same map
+ * always stores the same text.
+ */
+public struct JsonIntMap : carbon::Codec<map<string, int64>, string>
+{
+    public const function decode(string $raw) : result<map<string, int64>, carbon::Problem>
+    {
+        ordered_map<string, json::Value> $fields = guard Doc::fields($raw) else ($p) {
+            return .error($p);
+        }
+        map<string, int64> $out = [];
+        foreach ($fields as $k => const &$v) {
+            int64 $x = guard $v->asInt() else {
+                return .error(Doc::field($k, 'an integer'));
+            }
+            $out[$k] = $x;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const map<string, int64>& $value) : string
+    {
+        array<string> $keys = $value->keys();
+        $keys->sort();
+        json::Value $doc = json::object();
+        foreach ($keys as const &$k) {
+            int64 $x = $value->get($k);
+            $doc[$k] = json::int($x);
+        }
+        return json::dump($doc);
+    }
+}

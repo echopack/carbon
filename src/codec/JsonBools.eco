@@ -1,0 +1,33 @@
+namespace carbon::codec;
+
+/**
+ * `array<bool>` as a JSON array: `[true]`.
+ */
+public struct JsonBools : carbon::Codec<array<bool>, string>
+{
+    public const function decode(string $raw) : result<array<bool>, carbon::Problem>
+    {
+        array<json::Value> $items = guard Doc::list($raw) else ($p) {
+            return .error($p);
+        }
+        array<bool> $out = [];
+        int64 $at = 0;
+        foreach ($items as const &$v) {
+            bool $x = guard $v->asBool() else {
+                return .error(Doc::item($at, 'a boolean'));
+            }
+            $out[] = $x;
+            $at = $at + 1;
+        }
+        return .ok(mv $out);
+    }
+
+    public const function encode(const array<bool>& $value) : string
+    {
+        json::Value $doc = json::arr();
+        foreach ($value as const &$x) {
+            $doc[] = json::bool($x);
+        }
+        return json::dump($doc);
+    }
+}

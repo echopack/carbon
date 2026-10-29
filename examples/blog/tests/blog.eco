@@ -1,0 +1,271 @@
+use blog::{UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostTable, UserTable, CommentTable, PostQuery, CommentQuery};
+use carbon::{Db, Error};
+use carbon::listen::Log;
+use carbon::fake;
+use carbon::clock;
+use hydrahon::{Value, Mysql};
+
+/**
+ * A blog on a fake MySQL, on a fixed clock: the Db with the three repositories registered.
+ */
+class Rig
+{
+    public fake::Driver<Mysql> $fake;
+    public Db $db;
+    public Log $log;
+    public UserRepository $users;
+    public PostRepository $posts;
+    public CommentRepository $comments;
+
+    public constructor()
+    {
+        $this->fake = fake::Driver<Mysql>();
+        $this->log = Log();
+        $this->db = Db($this->fake, clock: clock::Fixed(unix: 1700000000));
+        $this->db->listen($this->log);
+        $this->db->register(UserRepository($this->db->connection()));
+        $this->db->register(PostRepository($this->db->connection()));
+        $this->db->register(CommentRepository($this->db->connection()));
+        $this->users = $this->db->repo<UserRepository>();
+        $this->posts = $this->db->repo<PostRepository>();
+        $this->comments = $this->db->repo<CommentRepository>();
+    }
+}
+
+/**
+ * A posts row: what the database holds for this post, with 12 views.
+ */
+function postRow(int64 $id, int64 $author, const string& $title, Status $status = .draft, array<string> $tags = []) : array<Value>
+{
+    return PostTable()->row(Post($id: $id, $authorId: $author, $title: $title, $status: $status, $views: 12, $tags: $tags));
+}
+
+function userRow(int64 $id, const string& $name) : array<Value>
+{
+    return UserTable()->row(User($id: $id, $email: "{$name}@example.com", $name: $name));
+}
+
+const string POSTS = 'SELECT `posts`.`id`, `posts`.`author_id`, `posts`.`title`, `posts`.`body`, `posts`.`status`, `posts`.`views`, `posts`.`tags`, `posts`.`meta`, `posts`.`created_at`, `posts`.`updated_at`, `posts`.`deleted_at` FROM `posts`';
+
+function posts(const string& $tail) : string
+{
+    string $out = POSTS;
+    $out->append($tail);
+    return $out;
+}
+
+test writing_a_post
+{
+    $r = Rig();
+    $r->fake->written($insertId: 1)->written($insertId: 10);
+    User $mario = guard $r->users->create(User($email: 'mario@example.com', $name: 'Mario'));
+    Post $post = guard $r->posts->create(Post($authorId: $mario->id, $title: 'Hello carbon', $tags: ['echo', 'orm']));
+    assert($post->id == 10);
+    assert($post->status == Status::draft);
+    assert($r->fake->last() == 'INSERT INTO `posts` (`author_id`, `title`, `body`, `status`, `views`, `tags`, `meta`, `created_at`, `updated_at`, `deleted_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    hydrahon::DateTime $at = guard $post->createdAt;
+    assert($r->fake->sent(1, [Value::from(1), Value::from('Hello carbon'), Value::none, Value::from(0), Value::from(0), Value::from('echo,orm'), Value::from('{}'), Value::from($at), Value::from($at), Value::none]));
+}
+
+test reading_maps_enums_codecs_and_narrow_numbers
+{
+    $r = Rig();
+    $r->fake->rows([postRow(5, 1, 'Typed', .published, ['a', 'b', 'c'])]);
+    Post $p = guard $r->posts->find()->one(5);
+    assert($p->status == Status::published);
+    assert($p->views == 12);
+    assert($p->tags->count() == 3 && $p->tags[2] == 'c');
+    assert($p->body == null);
+}
+
+test post_meta_is_a_json_column
+{
+    $r = Rig();
+    array<Value> $row = postRow(5, 1, 'Meta');
+    $row[7] = Value::from('{"lang": "de", "pinned": true}');
+    $r->fake->rows([$row])->written(1);
+    Post $p = guard $r->posts->find()->one(5);
+    assert(($p->meta['lang']->asStr() ?? '') == 'de');
+    assert(!$p->dirty());
+    $p->meta['lang'] = 'en';
+    guard $p->save();
+    assert($r->fake->last() == 'UPDATE `posts` SET `meta` = ?, `updated_at` = ? WHERE `posts`.`id` = ?');
+    assert(carbon::change::Snapshot::same($r->fake->params(1)[0], Value::from('{"lang":"en","pinned":true}')));
+}
+
+test publishing_writes_only_the_status
+{
+    $r = Rig();
+    $r->fake->rows([postRow(5, 1, 'Draft', .draft)])->written(1);
+    Post $p = guard $r->posts->find()->one(5);
+    assert($p->tags->count() == 0);
+    guard $r->posts->publish($p);
+    assert($r->fake->last() == 'UPDATE `posts` SET `status` = ?, `updated_at` = ? WHERE `posts`.`id` = ?');
+}
+
+test custom_finders
+{
+    $r = Rig();
+    $r->fake->rows([])->rows([])->rows([]);
+    guard $r->posts->active();
+    assert($r->fake->last() == posts(' WHERE `posts`.`status` = ? AND `posts`.`deleted_at` IS NULL ORDER BY `posts`.`created_at` DESC'));
+    User $mario = User($id: 1, $email: 'm@x.ch', $name: 'Mario');
+    guard $r->posts->feed($mario, 2);
+    assert($r->fake->last() == posts(' WHERE `posts`.`status` = ? AND `posts`.`author_id` = ? AND `posts`.`deleted_at` IS NULL ORDER BY `posts`.`created_at` DESC LIMIT 10 OFFSET 20'));
+    guard $r->posts->search('carbon');
+    assert($r->fake->last() == posts(' WHERE `posts`.`status` = ? AND `posts`.`title` LIKE ? AND `posts`.`deleted_at` IS NULL'));
+    assert($r->fake->sent(2, [Value::from(1), Value::from('%carbon%')]));
+    // wildcards in the search text are searched for, not matched with
+    $r->fake->rows([]);
+    guard $r->posts->search('50%_off\\');
+    assert($r->fake->sent(3, [Value::from(1), Value::from('%50\\%\\_off\\\\%')]));
+}
+
+test eager_loading_costs_one_query_per_relation
+{
+    $r = Rig();
+    $r->fake->rows([postRow(1, 7, 'a', .published), postRow(2, 8, 'b', .published), postRow(3, 7, 'c', .published)]);
+    $r->fake->rows([userRow(7, 'mario'), userRow(8, 'boris')]);
+    $r->fake->rows([CommentTable()->row(Comment($id: 100, $postId: 3, $body: 'nice'))]);
+    array<Post> $list = guard $r->posts->find()->withAuthor()->withComments()->published()->get();
+    assert($r->log->count() == 3);
+    assert($r->log->entries[1]->statement->text == 'SELECT `users`.`id`, `users`.`email`, `users`.`name`, `users`.`admin`, `users`.`created_at`, `users`.`updated_at` FROM `users` WHERE `users`.`id` IN (?, ?)');
+    assert($r->log->entries[2]->statement->text == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?, ?, ?)');
+    User $a = guard $list[0]->author->get();
+    User $b = guard $list[1]->author->get();
+    assert($a->name == 'mario' && $b->name == 'boris');
+    assert($list[0]->comments->loaded() && $list[0]->comments->count() == 0);
+    assert($list[2]->comments->count() == 1);
+    assert($list[2]->comments->get()[0]->body == 'nice');
+}
+
+test filling_relations_of_posts_in_hand
+{
+    $r = Rig();
+    array<Post> $mine = [Post($id: 1, $authorId: 7, $title: 'a'), Post($id: 2, $authorId: 7, $title: 'b')];
+    $r->fake->rows([userRow(7, 'mario')]);
+    $r->fake->rows([CommentTable()->row(Comment($id: 100, $postId: 2, $body: 'nice'))]);
+    guard $r->posts->load()->withAuthor()->withComments()->into($mine);
+    assert($r->log->count() == 2);
+    User $a = guard $mine[1]->author->get();
+    assert($a->name == 'mario');
+    assert($mine[0]->comments->loaded() && $mine[1]->comments->count() == 1);
+}
+
+test get_reads_one_post_by_key_or_by_a_condition
+{
+    $r = Rig();
+    $r->fake->rows([postRow(5, 7, 'a')]);
+    Post? $byKey = guard $r->posts->get(5);
+    Post $found = guard $byKey;
+    assert($found->id == 5);
+    assert($r->fake->last() == posts(' WHERE `posts`.`id` = ? AND `posts`.`deleted_at` IS NULL LIMIT 1'));
+    $r->fake->rows([]);
+    Post? $none = guard $r->posts->get(PostTable::$title == 'nope');
+    assert($none == null);
+    assert($r->fake->last() == posts(' WHERE `posts`.`title` = ? AND `posts`.`deleted_at` IS NULL LIMIT 1'));
+}
+
+test a_users_posts
+{
+    $r = Rig();
+    $r->fake->rows([userRow(7, 'mario')])->rows([postRow(1, 7, 'a', .published), postRow(2, 7, 'b', .draft)]);
+    array<User> $users = guard $r->users->all();
+    guard $r->users->load()->withPosts()->into($users);
+    assert($users[0]->posts->count() == 2);
+    assert($r->fake->last() == posts(' WHERE `posts`.`author_id` IN (?) AND `posts`.`deleted_at` IS NULL'));
+}
+
+test nested_relations_cost_one_query_per_level
+{
+    $r = Rig();
+    $r->fake->rows([userRow(7, 'mario')]);
+    $r->fake->rows([postRow(1, 7, 'a', .published), postRow(2, 7, 'b', .published)]);
+    $r->fake->rows([CommentTable()->row(Comment($id: 100, $postId: 2, $body: 'nice'))]);
+    array<User> $users = guard $r->users->find()->withPosts(function(PostQuery $q) : PostQuery {
+        return $q->published()->withComments();
+    })->get();
+    assert($r->log->count() == 3);
+    assert($r->log->entries[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) AND `posts`.`status` = ? AND `posts`.`deleted_at` IS NULL'));
+    assert($r->fake->last() == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?, ?)');
+    const array<Post>& $mine = $users[0]->posts->get();
+    assert($mine->count() == 2);
+    assert($mine[0]->comments->loaded() && $mine[0]->comments->count() == 0);
+    assert($mine[1]->comments->get()[0]->body == 'nice');
+}
+
+test callbacks_shape_each_level
+{
+    $r = Rig();
+    $r->fake->rows([userRow(7, 'mario')])->rows([postRow(1, 7, 'a', .published)])->rows([]);
+    guard $r->users->find()->withPosts(function(PostQuery $q) : PostQuery {
+        return $q->newest()->scope(.all)->withComments(function(CommentQuery $c) : CommentQuery {
+            return $c->oldest();
+        });
+    })->get();
+    assert($r->log->entries[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) ORDER BY `posts`.`created_at` DESC'));
+    assert($r->fake->last() == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?) ORDER BY `comments`.`created_at` ASC');
+}
+
+test leaving_a_comment_and_archiving
+{
+    $r = Rig();
+    $r->fake->written($insertId: 55)->written(4);
+    Post $p = Post($id: 3, $authorId: 7, $title: 'x');
+    Comment $c = guard $r->comments->leave($p, 'first!');
+    assert($c->id == 55);
+    User $mario = User($id: 7, $email: 'm@x.ch', $name: 'Mario');
+    uint64 $n = guard $r->posts->archive($mario);
+    assert($n == 4);
+    assert($r->fake->last() == 'UPDATE `posts` SET `status` = ? WHERE `posts`.`author_id` = ? AND `posts`.`deleted_at` IS NULL');
+    assert($r->fake->sent(1, [Value::from(2), Value::from(7)]));
+}
+
+test a_transaction_rolls_back_on_a_duplicate
+{
+    $r = Rig();
+    $r->fake->written($insertId: 1)->fails(.driver(carbon::Failure(.duplicate, 'Duplicate entry', '23000', 1062)));
+    Db $db = $r->db;
+    status<Error> $s = $db->transaction(function[$db]() : status<Error> {
+        User $u = guard $db->repo<UserRepository>()->create(User($email: 'a@x.ch', $name: 'A')) else ($e) { return .error($e); }
+        guard $db->repo<UserRepository>()->create(User($email: 'a@x.ch', $name: 'Again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failed());
+    assert($s->failure()->duplicate());
+    assert($r->fake->texts()[3] == 'ROLLBACK');
+}
+
+test byEmail_finds_one_user
+{
+    $r = Rig();
+    $r->fake->rows([userRow(7, 'mario')]);
+    User? $u = guard $r->users->byEmail('mario@example.com');
+    User $found = guard $u;
+    assert($found->id == 7);
+    assert($r->fake->last() == 'SELECT `users`.`id`, `users`.`email`, `users`.`name`, `users`.`admin`, `users`.`created_at`, `users`.`updated_at` FROM `users` WHERE `users`.`email` = ? LIMIT 1');
+}
+
+test enum_columns_compare_with_cases
+{
+    $r = Rig();
+    $r->fake->rows([]);
+    guard $r->posts->find()->where(!PostTable::$status->is(Status::archived) || PostTable::$status->in([Status::draft, Status::published]))->order([PostTable::$status->desc()])->get();
+    assert($r->fake->last() == posts(' WHERE (NOT (`posts`.`status` = ?) OR `posts`.`status` IN (?, ?)) AND `posts`.`deleted_at` IS NULL ORDER BY `posts`.`status` DESC'));
+    assert($r->fake->sent(0, [Value::from(2), Value::from(0), Value::from(1)]));
+    // outside && and ||, == reads the cases directly
+    $r->fake->rows([]);
+    guard $r->posts->find()->where(PostTable::$status == Status::draft)->get();
+    assert($r->fake->last() == posts(' WHERE `posts`.`status` = ? AND `posts`.`deleted_at` IS NULL'));
+}
+
+test the_repository_hook_trims_and_refuses_titles
+{
+    $r = Rig();
+    $r->fake->written($insertId: 3);
+    Post $p = guard $r->posts->create(Post($authorId: 1, $title: '  Spaced out  '));
+    assert($p->title == 'Spaced out');
+    result<Post, Error> $empty = $r->posts->create(Post($authorId: 1, $title: ' '));
+    assert(str::from($empty->failure()) == 'refused: a post needs a title');
+    assert($r->fake->count() == 1);
+}
