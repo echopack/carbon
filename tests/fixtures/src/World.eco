@@ -1,32 +1,44 @@
 namespace fixtures;
 
 /**
- * Everything a test needs: the fake, the Db and its four registered repositories, on a fixed
- * clock at 2023-11-14 22:13:20 UTC.
+ * Everything a test needs: the fake, the Db with every repository registered, its root session
+ * and a repository of each model built for it, on a fixed clock at 2023-11-14 22:13:20 UTC.
  */
 public class World
 {
     public carbon::fake::Driver<hydrahon::Mysql> $fake;
     public carbon::Db $db;
+    public carbon::Session $session;
     public carbon::clock::Fixed $clock;
     public NoteRepository $notes;
     public TagRepository $tags;
     public SettingRepository $settings;
     public ProfileRepository $profiles;
+    public DraftRepository $drafts;
 
     public constructor()
     {
         $this->fake = carbon::fake::Driver<hydrahon::Mysql>();
         $this->clock = carbon::clock::Fixed(unix: 1700000000);
         $this->db = carbon::Db($this->fake, clock: $this->clock);
-        $this->db->register(NoteRepository($this->db->connection()));
-        $this->db->register(TagRepository($this->db->connection()));
-        $this->db->register(SettingRepository($this->db->connection()));
-        $this->db->register(ProfileRepository($this->db->connection()));
-        $this->notes = $this->db->repo<NoteRepository>();
-        $this->tags = $this->db->repo<TagRepository>();
-        $this->settings = $this->db->repo<SettingRepository>();
-        $this->profiles = $this->db->repo<ProfileRepository>();
+        Trail $trail = Trail();
+        NoteFlags $flags = NoteFlags();
+        guard $this->db->register<NoteRepository>(function[$trail, $flags](carbon::Session $s) : NoteRepository {
+            return NoteRepository($s, $trail, $flags);
+        });
+        guard $this->db->register<SettingRepository>();
+        guard Carbon::register($this->db);
+        guard Carbon::check($this->db);
+        $this->session = $this->db->session();
+        NoteRepository $notes = guard $this->session->repo<NoteRepository>();
+        $this->notes = $notes;
+        TagRepository $tags = guard $this->session->repo<TagRepository>();
+        $this->tags = $tags;
+        SettingRepository $settings = guard $this->session->repo<SettingRepository>();
+        $this->settings = $settings;
+        ProfileRepository $profiles = guard $this->session->repo<ProfileRepository>();
+        $this->profiles = $profiles;
+        DraftRepository $drafts = guard $this->session->repo<DraftRepository>();
+        $this->drafts = $drafts;
     }
 }
-

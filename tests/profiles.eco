@@ -1,9 +1,5 @@
 /*
  * Codec columns on a model: fixtures::Profile has one per codec carbon brings and one of its own.
- *
- * Its repository is the generated `carbon::Records` alias, and echoc 0.11.4 loses a generic
- * class's interface defaults when the alias is used in a file read before the one declaring it:
- * files are read in path order, so this one has to sort after tests/fixtures/.
  */
 
 use carbon::Error;

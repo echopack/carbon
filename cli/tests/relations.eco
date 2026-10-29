@@ -20,18 +20,34 @@ test a_has_many_through_a_nullable_key
     string $out = emitted(tree());
     // the children are picked by their nullable key, and only the ones that have it are indexed
     assert($out->contains("public class NoteRepliesRelation : carbon::Eager<app::Note>"));
-    assert($out->contains('            app::NoteQuery $q = $this->fetch->query($db, app::NoteTable::$parentId in $keys->list());'));
-    assert($out->contains("        foreach ($found as const &$f) \{\n            if ($f->parentId != null) \{\n                int64 $k = guard $f->parentId;\n                $by->add($k, $f);\n            }\n        }"));
+    assert($out->contains('            app::NoteQuery $q = guard $this->fetch->query($session, app::NoteTable::$parentId in $keys->list(), $seen) else ($e) { return .error($e); }'));
+    assert($out->contains("            if ($f->parentId != null) \{\n                int64 $k = guard $f->parentId;\n                $by->add($k, $f);\n                if ($had == null) \{\n                    $seen->add<int64, app::Note>($f->id, $f);"));
+    // many keeps its own copies, held strongly
     assert($out->contains('            $m->replies->set($by->all($m->id));'));
-    assert($out->contains('            $m->pinned->set($by->first($m->id));'));
 }
 
 test a_belongs_to_through_a_nullable_key
 {
     string $out = emitted(tree());
-    // a model without a parent adds no key and gets an empty slot
-    assert($out->contains("        foreach ($models as const &$m) \{\n            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                $keys->add($k);\n            }\n        }"));
-    assert($out->contains("            app::Note? $one = null;\n            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                $one = $by->first($k);\n            }\n            $m->parent->set($one);"));
+    // a model without a parent adds no key, nor does one whose parent this load holds already
+    assert($out->contains("            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                app::Note? $held = null;\n                if ($reuse) \{\n                    $held = $seen->find<int64, app::Note>($k);\n                }\n                if ($held == null) \{\n                    $keys->add($k);\n                }\n            }"));
+    assert($out->contains("            if ($m->parentId == null) \{\n                $m->parent->set(null);\n                continue;\n            }"));
     // the parent is indexed by its own key, which is never null
-    assert($out->contains("        foreach ($found as const &$f) \{\n            $by->add($f->id, $f);\n        }"));
+    assert($out->contains("            $by->add($f->id, $f);\n            if ($had == null) \{\n                $seen->add<int64, app::Note>($f->id, $f);"));
+}
+
+test a_model_the_load_holds_is_shared_not_read_again
+{
+    string $out = emitted(tree());
+    // only a relation nothing narrows reuses
+    assert($out->contains('        bool $reuse = $this->fetch->plain();'));
+    // read now: held; held by the load already: shared, weakly
+    assert($out->contains("            app::Note? $fresh = $by->first($k);\n            if ($fresh != null) \{\n                $m->parent->set($fresh);\n                continue;\n            }\n            app::Note? $shared = null;\n            if ($reuse) \{\n                $shared = $seen->find<int64, app::Note>($k);\n            }"));
+    assert($out->contains("                $m->parent->share($s);"));
+    // has one reads its row, and shares the copy the load already holds
+    assert($out->contains("                if ($reuse && $had != null) \{\n                    app::Note $h = guard $had;\n                    $known->add($k, $h);"));
+    assert($out->contains("            app::Note? $shared = $known->first($k);"));
+    assert($out->contains("                $m->pinned->share($s);"));
+    // load() starts with the models in hand
+    assert($out->contains("        carbon::Loaded $seen = carbon::Loaded();\n        foreach ($models as const &$m) \{\n            $seen->add<int64, app::Note>($m->id, $m);\n        }\n        return $this->fill->into($models, $seen);"));
 }

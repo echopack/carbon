@@ -8,7 +8,9 @@ namespace carbon;
 public interface Eager<M>
 {
     /**
-     * Fill the relation's slot of every model in `$models`, with one query on `$db`.
+     * Fill the relation's slot of every model in `$models`, with one query in `$session`.
+     * `$seen` holds what the load handed out so far; a relation reuses those models, and adds
+     * the ones it reads.
      */
-    function load(array<M>& $models, Connection $db) : status<Error>;
+    function load(array<M>& $models, Session $session, Loaded $seen) : status<Error>;
 }

@@ -6,7 +6,7 @@ namespace carbon::mysql;
  * ```echo
  * carbon::mysql::Driver $driver = guard carbon::mysql::Driver::open('mysql://root@127.0.0.1/blog');
  * carbon::Db $db = carbon::Db($driver);
- * $db->register(PostRepository($db->connection()));
+ * guard $db->register<PostRepository>();
  * ```
  */
 public class Driver : carbon::Driver
@@ -14,6 +14,13 @@ public class Driver : carbon::Driver
     public mysql::Connection $connection;
     internal hydrahon::Mysql $dialect;
     internal mysql::Transaction? $open = null;
+
+    /**
+     * Whether the connection counts the rows an UPDATE matched (`foundRows`), so carbon can tell
+     * a write that found no row from one that changed nothing. `open` turns it on; a connection
+     * opened elsewhere is not trusted with it.
+     */
+    internal bool $matched = false;
 
     public constructor(mysql::Connection $connection)
     {
@@ -35,8 +42,21 @@ public class Driver : carbon::Driver
      */
     public static function open(const string& $url) : result<Driver, Error>
     {
-        mysql::Connection $c = guard mysql::Connection::open($url) else ($e) { return .error(Driver::failure($e)); }
-        return .ok(Driver($c));
+        mysql::Options $o = guard mysql::Options::parse($url) else ($e) { return .error(Driver::failure($e)); }
+        return Driver::open($o);
+    }
+
+    /**
+     * Connect with `$options`. The connection always counts matched rows, whatever `$options`
+     * says: carbon relies on it to notice a row that is gone.
+     */
+    public static function open(mysql::Options $options) : result<Driver, Error>
+    {
+        $options->foundRows = true;
+        mysql::Connection $c = guard mysql::Connection::open($options) else ($e) { return .error(Driver::failure($e)); }
+        Driver $d = Driver($c);
+        $d->matched = true;
+        return .ok($d);
     }
 
     public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
@@ -78,7 +98,7 @@ public class Driver : carbon::Driver
 
     public const function traits() : Traits
     {
-        return Traits(false);
+        return Traits(false, $this->matched);
     }
 
     public function begin() : status<Error>

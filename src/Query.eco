@@ -13,7 +13,7 @@ use carbon::select::Pick;
  * {
  *     internal PostRows $rows;
  *
- *     public constructor(carbon::Connection $db) { $this->rows = PostRows($db); }
+ *     public constructor(carbon::Session $session) { $this->rows = PostRows($session); }
  *     public function rows() : PostRows& { return $this->rows; }
  *
  *     public function published() : PostQuery { return $this->where(PostTable::$status == Status::published); }
@@ -27,16 +27,11 @@ use carbon::select::Pick;
  *
  * A query struct may keep fields of its own (filters to turn into joins, a sort choice); every
  * copy carries them. Override `apply()` to turn that state into SQL right before the query
- * runs. A struct that builds itself from a `carbon::Connection` alone, `PostQuery($db)`, is what
- * carbon builds to find a model's store.
+ * runs. A query builds itself from a `carbon::Session` alone, `PostQuery($session)`: that is how
+ * a repository's default `query()` makes one.
  */
 public interface Query<M, Q>
 {
-    /**
-     * The repository models of this query link to.
-     */
-    type Repo : class;
-
     /**
      * The model's key type, `int64` for an auto increment id.
      */
@@ -45,12 +40,12 @@ public interface Query<M, Q>
     /**
      * The model's schema: the generated table class, or one written by hand.
      */
-    type Table : Schema<M, Key, Repo>;
+    type Table : Schema<M, Key>;
 
     /**
      * What this query has gathered so far.
      */
-    function rows() : Rows<M, Key, Table, Repo>&;
+    function rows() : Rows<M, Key, Table>&;
 
     /**
      * Add a condition. Conditions are ANDed; `||` inside one ORs.
@@ -58,7 +53,7 @@ public interface Query<M, Q>
     function where(hydrahon::Term<bool> $condition) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->conditions[] = mv $condition;
         return $copy;
     }
@@ -70,7 +65,7 @@ public interface Query<M, Q>
     function with(Eager<M> $relation) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->eager[] = mv $relation;
         return $copy;
     }
@@ -99,7 +94,7 @@ public interface Query<M, Q>
     function order(array<hydrahon::Order> $by) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         foreach ($by as const &$o) {
             $r->orders[] = $o;
         }
@@ -111,7 +106,7 @@ public interface Query<M, Q>
      */
     function newest() : Q
     {
-        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        Rows<M, Key, Table>& $r = $this->rows();
         return $this->order(desc: $r->store->table->created() ?? $r->store->table->byKey());
     }
 
@@ -120,14 +115,14 @@ public interface Query<M, Q>
      */
     function oldest() : Q
     {
-        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        Rows<M, Key, Table>& $r = $this->rows();
         return $this->order(asc: $r->store->table->created() ?? $r->store->table->byKey());
     }
 
     function limit(uint64 $rows) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->take = $rows;
         return $copy;
     }
@@ -135,7 +130,7 @@ public interface Query<M, Q>
     function offset(uint64 $rows) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->skip = $rows;
         return $copy;
     }
@@ -147,7 +142,7 @@ public interface Query<M, Q>
     function page(uint64 $index, size: uint64 $size) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->take = $size;
         uint64 $skip = 18446744073709551615;
         if ($size == 0 || $index <= $skip / $size) {
@@ -164,7 +159,7 @@ public interface Query<M, Q>
     function scope(Scope $scope) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->scope = $scope;
         return $copy;
     }
@@ -176,7 +171,7 @@ public interface Query<M, Q>
     function join(inner: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->join(inner: $source->table(), on: $on);
         $r->shaped = true;
         return $copy;
@@ -188,7 +183,7 @@ public interface Query<M, Q>
     function join(left: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->join(left: $source->table(), on: $on);
         $r->shaped = true;
         return $copy;
@@ -200,7 +195,7 @@ public interface Query<M, Q>
     function join(right: hydrahon::Source $source, on: hydrahon::Term<bool> $on) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->join(right: $source->table(), on: $on);
         $r->shaped = true;
         return $copy;
@@ -212,7 +207,7 @@ public interface Query<M, Q>
     function group(array<hydrahon::Expr> $by) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->group($by);
         $r->shaped = true;
         return $copy;
@@ -224,7 +219,7 @@ public interface Query<M, Q>
     function having(hydrahon::Term<bool> $condition) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->having($condition);
         $r->shaped = true;
         return $copy;
@@ -236,7 +231,7 @@ public interface Query<M, Q>
     function distinct() : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->select->distinct();
         $r->shaped = true;
         return $copy;
@@ -249,8 +244,21 @@ public interface Query<M, Q>
     function select(Pick $pick) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->selected->picks[] = mv $pick;
+        return $copy;
+    }
+
+    /**
+     * Load the models only to read them: no copy of their rows is kept, which halves what a
+     * large listing or an export holds. Writing such a model is refused with `.invalid`, and it
+     * is never dirty. Relations loaded with it are read-only too.
+     */
+    function readonly() : Q
+    {
+        Q $copy = $this;
+        Rows<M, Key, Table>& $r = $copy->rows();
+        $r->readonly = true;
         return $copy;
     }
 
@@ -261,7 +269,7 @@ public interface Query<M, Q>
     function adjust(function<void(hydrahon::Select&)> $change) : Q
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $change($r->select);
         $r->shaped = true;
         return $copy;
@@ -272,7 +280,7 @@ public interface Query<M, Q>
      */
     function limited() : bool
     {
-        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        Rows<M, Key, Table>& $r = $this->rows();
         return $r->take != null;
     }
 
@@ -281,7 +289,7 @@ public interface Query<M, Q>
      */
     function ordered() : bool
     {
-        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        Rows<M, Key, Table>& $r = $this->rows();
         return $r->orders->count() > 0;
     }
 
@@ -290,8 +298,17 @@ public interface Query<M, Q>
      */
     function connection() : Connection
     {
-        Rows<M, Key, Table, Repo>& $r = $this->rows();
+        Rows<M, Key, Table>& $r = $this->rows();
         return $r->db;
+    }
+
+    /**
+     * The session this query runs in, and the models it finds link to.
+     */
+    function session() : Session
+    {
+        Rows<M, Key, Table>& $r = $this->rows();
+        return $r->session;
     }
 
     /**
@@ -312,7 +329,7 @@ public interface Query<M, Q>
     function get() : result<array<M>, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->get();
     }
 
@@ -322,7 +339,7 @@ public interface Query<M, Q>
     function first() : result<M?, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->first();
     }
 
@@ -342,7 +359,7 @@ public interface Query<M, Q>
     function get(Key $key) : result<M?, Error>
     {
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->conditions[] = $r->store->table->keyIs($key);
         return $copy->first();
     }
@@ -367,7 +384,7 @@ public interface Query<M, Q>
             return .ok(mv $none);
         }
         Q $copy = $this;
-        Rows<M, Key, Table, Repo>& $r = $copy->rows();
+        Rows<M, Key, Table>& $r = $copy->rows();
         $r->conditions[] = $r->store->table->keyIn($keys);
         return $copy->get();
     }
@@ -378,7 +395,7 @@ public interface Query<M, Q>
     function count() : result<uint64, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->count();
     }
 
@@ -388,7 +405,7 @@ public interface Query<M, Q>
     function exists() : result<bool, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->exists();
     }
 
@@ -402,7 +419,7 @@ public interface Query<M, Q>
     function each(function<status<Error>(M)> $visit) : status<Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->each($visit);
     }
 
@@ -414,7 +431,7 @@ public interface Query<M, Q>
     function each(batch: uint64 $size, function<status<Error>(array<M>)> $visit) : status<Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->batches($size, $visit);
     }
 
@@ -428,7 +445,7 @@ public interface Query<M, Q>
     function update(hydrahon::Values $values) : result<uint64, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->update(mv $values);
     }
 
@@ -440,7 +457,7 @@ public interface Query<M, Q>
     function purge() : result<uint64, Error>
     {
         Q $ready = guard $this->apply() else ($e) { return .error($e); }
-        Rows<M, Key, Table, Repo>& $r = $ready->rows();
+        Rows<M, Key, Table>& $r = $ready->rows();
         return $r->purge();
     }
 }

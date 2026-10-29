@@ -1,0 +1,178 @@
+/*
+ * Sessions: every request works in its own, with what it is about as context; repositories are
+ * built for it, hooks and observers read its context, and models outlive it only detached.
+ */
+
+use carbon::{Error, Event, Refusal, Session};
+use hydrahon::Value;
+use fixtures::{World, Note, NoteRepository, Editor, Trail, noteRow, message};
+
+/**
+ * What an observer saw of the session each write ran in.
+ */
+internal class Witness : carbon::Observer<Note>
+{
+    public Trail $trail;
+
+    public constructor(Trail $trail)
+    {
+        $this->trail = $trail;
+    }
+
+    public function before(Session $session, Event $event, Note& $model) : status<Error>
+    {
+        Editor? $editor = $session->get<Editor>();
+        if ($editor == null) {
+            $this->trail->heard[] = 'nobody';
+            return .ok();
+        }
+        Editor $e = guard $editor;
+        $this->trail->heard[] = "seen {$e->name}";
+        return .ok();
+    }
+
+    public function after(Session $session, Event $event, const Note& $model) : void
+    {
+    }
+}
+
+/**
+ * The fields a refusal names, as its typed detail.
+ */
+internal class Fields
+{
+    public array<string> $bad = [];
+}
+
+internal class Other
+{
+}
+
+/**
+ * Refuses every write, naming the title as the bad field.
+ */
+internal class Strict : carbon::Observer<Note>
+{
+    public function before(Session $session, Event $event, Note& $model) : status<Error>
+    {
+        Fields $f = Fields();
+        $f->bad[] = 'title';
+        return .error(.refused(Refusal::of('note.invalid', 'fix the fields', $f)));
+    }
+
+    public function after(Session $session, Event $event, const Note& $model) : void
+    {
+    }
+}
+
+test a_scoped_session_carries_its_context_to_the_hooks
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Before')])->written(1);
+    Session $s = $w->db->scoped(Editor('mario'));
+    NoteRepository $notes = guard $s->repo<NoteRepository>();
+    Note $n = guard $notes->find()->one(3);
+    $n->title = 'After';
+    // saved through its link: the repository is built for the session the note was read in
+    guard $n->save();
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 1 | by mario | repo after 1');
+}
+
+test the_root_session_carries_nothing
+{
+    $w = World();
+    assert($w->session->get<Editor>() == null);
+    $w->fake->written($insertId: 1);
+    guard $w->notes->create(Note($title: 'Plain'));
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | repo after 0');
+}
+
+test observers_are_handed_the_session_of_the_write
+{
+    $w = World();
+    Trail $seen = Trail();
+    $w->notes->observe(Witness($seen));
+    $w->fake->written($insertId: 1)->written($insertId: 2);
+    guard $w->notes->create(Note($title: 'Root'));
+    NoteRepository $scoped = guard $w->db->scoped(Editor('boris'))->repo<NoteRepository>();
+    guard $scoped->create(Note($title: 'Scoped'));
+    assert(str::join($seen->heard, ' | ') == 'nobody | seen boris');
+}
+
+test sessions_keep_their_context_apart
+{
+    $w = World();
+    Session $a = $w->db->scoped(Editor('a'));
+    Session $b = $w->db->scoped();
+    assert($b->get<Editor>() == null);
+    $b->put(Editor('b'));
+    Editor $ea = guard $a->get<Editor>();
+    Editor $eb = guard $b->get<Editor>();
+    assert($ea->name == 'a' && $eb->name == 'b');
+    // a later put takes the place of the one before
+    $b->put(Editor('c'));
+    Editor $ec = guard $b->get<Editor>();
+    assert($ec->name == 'c');
+}
+
+/**
+ * A note read in a session of its own, which is gone once this returns.
+ */
+internal function readInPassing(World $w) : Note
+{
+    Session $s = $w->db->scoped(Editor('gone'));
+    NoteRepository $notes = guard $s->repo<NoteRepository>();
+    Note $n = guard $notes->find()->one(3);
+    return $n;
+}
+
+test a_model_outlives_its_session_detached_until_attached
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Kept')])->written(1);
+    Note $n = readInPassing($w);
+    assert(!$n->link->attached());
+    $n->title = 'Changed';
+    assert(message($n->save()) == 'the model is not linked to a live session');
+    // attached to the root session it keeps its row and its clean state: an update, not an insert
+    $w->notes->attach($n);
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 1 | repo after 1');
+}
+
+test a_refusal_carries_a_typed_detail
+{
+    $w = World();
+    $w->notes->observe(Strict());
+    status<Error> $s = $w->notes->save(Note($title: 'Any'));
+    assert(message($s) == 'refused: fix the fields');
+    match ($s->failure()) {
+        Error::refused($why) => {
+            assert($why->code == 'note.invalid');
+            Fields $f = guard $why->detail<Fields>();
+            assert($f->bad[0] == 'title');
+            assert($why->detail<Other>() == null);
+        },
+        else => {
+            assert(false);
+        },
+    };
+    // one made from a message alone has no code and no detail
+    Refusal $plain = Refusal('no');
+    assert($plain->code == '' && $plain->detail<Fields>() == null);
+}
+
+test a_transaction_belongs_to_its_session
+{
+    $w = World();
+    $w->fake->written($insertId: 1);
+    Session $s = $w->db->scoped(Editor('tx'));
+    NoteRepository $notes = guard $s->repo<NoteRepository>();
+    guard $s->transaction(function[$notes]() : status<Error> {
+        guard $notes->create(Note($title: 'Inside')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($w->fake->texts()[0] == 'BEGIN' && $w->fake->texts()[2] == 'COMMIT');
+    assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | by tx | repo after 0');
+}

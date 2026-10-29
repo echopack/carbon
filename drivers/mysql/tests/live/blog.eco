@@ -30,12 +30,16 @@ class Live
             guard $this->db->run($sql) else ($e) { die("{$sql}: {$e}"); }
         }
         $this->db->listen($this->log);
-        $this->db->register(UserRepository($this->db->connection()));
-        $this->db->register(PostRepository($this->db->connection()));
-        $this->db->register(CommentRepository($this->db->connection()));
-        $this->users = $this->db->repo<UserRepository>();
-        $this->posts = $this->db->repo<PostRepository>();
-        $this->comments = $this->db->repo<CommentRepository>();
+        guard $this->db->register<UserRepository>();
+        guard $this->db->register<PostRepository>();
+        guard $this->db->register<CommentRepository>();
+        guard blog::Carbon::check($this->db);
+        UserRepository $users = guard $this->db->session()->repo<UserRepository>();
+        $this->users = $users;
+        PostRepository $posts = guard $this->db->session()->repo<PostRepository>();
+        $this->posts = $posts;
+        CommentRepository $comments = guard $this->db->session()->repo<CommentRepository>();
+        $this->comments = $comments;
     }
 
     /**
@@ -166,7 +170,7 @@ test live_blog_tour
     assert($popular == 1);
 
     // a duplicate inside a transaction rolls the whole thing back
-    status<Error> $s = $b->db->transaction(function[$b]() : status<Error> {
+    status<Error> $s = $b->db->session()->transaction(function[$b]() : status<Error> {
         guard $b->users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
         guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
         return .ok();
@@ -228,4 +232,39 @@ test live_writes_inside_each
     // and the connection is free again after a stream that stopped early
     uint64 $n = guard $b->posts->count();
     assert($n == 2);
+}
+
+test live_models_follow_the_database
+{
+    $live = Live();
+    $b = $live;
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario'));
+    Post $p = guard $b->posts->create(Post($authorId: $mario->id, $title: 'Mine'));
+
+    // someone else already wrote the same title: the row matches but nothing changes, which a
+    // connection counting only changed rows would report as no row at all
+    guard $b->db->run("UPDATE posts SET title = 'Theirs' WHERE id = {$p->id}");
+    $p->title = 'Theirs';
+    guard $p->save() else ($e) { die("an unchanged row is not stale: {$e}"); }
+
+    // the row is gone underneath
+    guard $b->db->run("DELETE FROM posts WHERE id = {$p->id}");
+    $p->title = 'Lost';
+    status<Error> $lost = $p->save();
+    assert(str::from($lost->failure()) == 'the row is gone or changed since the model was loaded');
+
+    // a rolled back insert leaves the model new, and it inserts again later
+    User $carol = User($email: 'carol@example.com', $name: 'Carol');
+    $b->users->attach($carol);
+    status<Error> $s = $b->db->session()->transaction(function[$b, $carol]() : status<Error> {
+        guard $carol->save() else ($e) { return .error($e); }
+        guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failure()->duplicate());
+    assert(!$carol->persisted() && $carol->id == 0);
+    guard $carol->save();
+    assert($carol->persisted() && $carol->id > 0);
+    uint64 $users = guard $b->users->count();
+    assert($users == 2);
 }

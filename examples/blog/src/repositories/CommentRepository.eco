@@ -1,13 +1,8 @@
 namespace blog;
 
-public class CommentRepository : carbon::Repository<Comment, CommentQuery, int64>, CommentLoading
+public struct CommentRepository : carbon::Repository<Comment, CommentQuery, int64>, CommentWiring
 {
-    public carbon::Connection $db;
-
-    public function query() : CommentQuery
-    {
-        return CommentQuery($this->db);
-    }
+    public carbon::Session $session;
 
     /**
      * Leave a comment on `$post`.

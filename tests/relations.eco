@@ -93,16 +93,75 @@ test relations_nest_one_query_per_level
     $w = World();
     $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
     $w->fake->rows([tagRow(10, 1, 'x'), tagRow(11, 2, 'y'), tagRow(12, 1, 'z')]);
-    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
     // a relation of a relation: the constraint asks the related query for its own relation
     array<Note> $notes = guard $w->notes->find()->withTags(function(TagQuery $q) : TagQuery {
         return $q->withNote();
     })->get();
-    assert($w->fake->count() == 3);
-    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?, ?) AND `notes`.`deleted_at` IS NULL'));
+    // the tags' notes are the notes the tags were loaded for: no third query
+    assert($w->fake->count() == 2);
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?, ?)'));
     Note $back = guard $notes[1]->tags->get()[0]->note->get();
     assert($back->title == 'b');
     assert($notes[0]->tags->get()[1]->note->loaded());
+    // the very same model, shared rather than held
+    assert($notes[1]->tags->get()[0]->note->shares());
+    $back->title = 'renamed';
+    assert($notes[1]->title == 'renamed');
+}
+
+test a_narrowed_relation_reads_its_own_copies
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a', true)]);
+    $w->fake->rows([tagRow(10, 1, 'x')]);
+    $w->fake->rows([noteRow(1, 'a', true)]);
+    // the note relation is narrowed, so the note the load holds may not be the one it would find
+    array<Note> $notes = guard $w->notes->find()->withTags(function(TagQuery $q) : TagQuery {
+        return $q->withNote(function(NoteQuery $n) : NoteQuery {
+            return $n->pinned();
+        });
+    })->get();
+    assert($w->fake->count() == 3);
+    Note $copy = guard $notes[0]->tags->get()[0]->note->get();
+    assert(!$notes[0]->tags->get()[0]->note->shares());
+    $copy->title = 'copy';
+    assert($notes[0]->title == 'a');
+}
+
+/**
+ * Notes with their tags and the tags' notes, returned with every note dropped but the tags.
+ */
+internal function tagsOnly(World $w) : array<Tag>
+{
+    array<Note> $notes = guard $w->notes->find()->withTags(function(TagQuery $q) : TagQuery {
+        return $q->withNote();
+    })->get();
+    array<Tag> $tags = $notes[0]->tags->get();
+    return $tags;
+}
+
+test a_shared_slot_reads_nothing_once_its_model_is_gone
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')])->rows([tagRow(10, 1, 'x')]);
+    array<Tag> $tags = tagsOnly($w);
+    // the tag never kept its note alive: no cycle between the two
+    assert($tags[0]->note->loaded());
+    assert($tags[0]->note->get() == null);
+}
+
+test load_shares_the_models_in_hand
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')])->rows([tagRow(10, 2, 'x')]);
+    array<Note> $list = guard $w->notes->all();
+    guard $w->notes->load()->withTags(function(TagQuery $q) : TagQuery {
+        return $q->withNote();
+    })->into($list);
+    assert($w->fake->count() == 2);
+    Note $back = guard $list[1]->tags->get()[0]->note->get();
+    $back->pinned = true;
+    assert($list[1]->pinned);
 }
 
 test a_nested_level_without_rows_runs_no_query
@@ -203,27 +262,22 @@ test a_relation_starts_from_the_registered_repository
 {
     $w = World();
     // the note repository narrows every query it starts; loading notes as a relation goes through it
-    $w->notes->pinnedOnly = true;
+    $w->notes->flags->pinnedOnly = true;
     $w->fake->rows([tagRow(10, 1, 'x')])->rows([]);
     guard $w->tags->find()->withNote()->get();
     assert($w->fake->last() == selectNotes(' WHERE `notes`.`pinned` AND `notes`.`id` IN (?) AND `notes`.`deleted_at` IS NULL'));
 }
 
-/**
- * Loads tags for a note on a database where only the note repository is registered.
- */
-function loadUnregistered() : void
+test a_relation_to_a_model_without_a_registered_repository_is_an_error
 {
     carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
     $fake->rows([tagRow(10, 1, 'x')]);
     carbon::Db $db = carbon::Db($fake);
-    $db->register(NoteRepository($db->connection()));
+    guard $db->register<NoteRepository>();
     array<Note> $list = [Note($id: 1, $title: 'a')];
-    guard $db->repo<NoteRepository>()->load()->withTags()->into($list);
-}
-
-#[tests: expects death]
-test a_relation_to_a_model_without_a_registered_repository_stops
-{
-    loadUnregistered();
+    NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
+    status<carbon::Error> $s = $notes->load()->withTags()->into($list);
+    assert(fixtures::message($s) == 'fixtures::TagRepository is not registered on the Db');
+    // refused before the query ran
+    assert($fake->count() == 0);
 }

@@ -3,17 +3,16 @@ namespace carbon;
 /**
  * A repository: the write side of model `M`, where its queries start, and the home of what an
  * app does with it: named finders, domain operations, dependencies, and hooks around every
- * write. `Q` is the model's query type and `K` its key type. A conformer is a class that writes
- * `query()`; everything else here is a default, and a method of the same name replaces one. It
- * is registered on a `Db` once, which makes it the repository its models link to:
- * `$db->register(PostRepository($db->connection()))`.
+ * write. `Q` is the model's query type and `K` its key type. A conformer is a struct that keeps
+ * its session in a `$session` field and names the generated `PostWiring`, which hands out the
+ * session and the model's store; everything here is a default, and a method of the same name
+ * replaces one.
  *
  * ```echo
- * public class PostRepository : carbon::Repository<Post, PostQuery, int64>, PostLoading
+ * public struct PostRepository : carbon::Repository<Post, PostQuery, int64>, PostWiring
  * {
- *     public carbon::Connection $db;
- *
- *     public function query() : PostQuery { return PostQuery($this->db); }
+ *     public carbon::Session $session;
+ *     public Mailer $mailer;
  *
  *     public function before(carbon::Event $event, Post& $post) : status<carbon::Error>
  *     {
@@ -30,18 +29,26 @@ namespace carbon;
  * }
  * ```
  *
- * `$posts->find()` starts a query, `$posts->get(42)` reads one model and `$posts->load()`, from
- * the generated `PostLoading`, fills the relations of models already in hand:
- * `$posts->load()->withAuthor()->withComments()->into($active)`. `$post->save()` and
- * `$posts->save($post)` both run the hooks: a model links to the repository that adopted it.
+ * It is registered on a `Db` by type, with what builds it:
+ * `$db->register<PostRepository>(function[$mailer](carbon::Session $s) : PostRepository { ... })`,
+ * and every session builds its own, `$session->repo<PostRepository>()`. `$posts->find()` starts a
+ * query, `$posts->get(42)` reads one model and `$posts->load()` fills the relations of models
+ * already in hand. `$post->save()` and `$posts->save($post)` both run the hooks: a model reaches
+ * the repository of the session it links to.
  */
 public interface Repository<M, Q, K>
 {
     /**
-     * A query over the model's rows, ready for scopes and conditions: what a conformer writes,
-     * and what `find()` and every default here start from.
+     * A query over the model's rows in this repository's session, ready for scopes and
+     * conditions. Every default here starts from it; replace it to narrow every query of the
+     * repository.
      */
-    function query() : Q;
+    function query() : Q
+    {
+        // bound first: a chained $this->session() never gets its type in a default
+        Session $s = $this->session();
+        return Q($s);
+    }
 
     /**
      * Start a query: `$posts->find()->published()->newest()->get()`.
@@ -49,16 +56,6 @@ public interface Repository<M, Q, K>
     function find() : Q
     {
         return $this->query();
-    }
-
-    /**
-     * Make this repository the one the models of `M` link to on its connection. `Db::register`
-     * calls it; a model read before it ran stops the program with a note saying so.
-     */
-    function adopt() : void
-    {
-        Q $q = $this->query();
-        $q->rows()->store->adopt($this);
     }
 
     /**
@@ -79,21 +76,22 @@ public interface Repository<M, Q, K>
     }
 
     /**
-     * The connection the repository works on.
+     * The connection the repository's session runs on.
      */
     function connection() : Connection
     {
-        return $this->query()->connection();
+        Session $s = $this->session();
+        return $s->connection;
     }
 
     /**
-     * Insert `$model` and hand it back linked, with its generated key. A model whose row
-     * already exists is refused with `.persisted`; `save` writes its changes.
+     * Insert `$model` and hand it back linked to this session, with its generated key. A model
+     * whose row already exists is refused with `.persisted`; `save` writes its changes.
      */
     function create(M $model) : result<M, Error>
     {
-        Q $q = $this->query();
-        guard $q->rows()->store->insert($model, $q->connection(), $this) else ($e) { return .error($e); }
+        $st = $this->store();
+        guard $st->insert($model, $this) else ($e) { return .error($e); }
         return .ok($model);
     }
 
@@ -103,8 +101,8 @@ public interface Repository<M, Q, K>
      */
     function save(M& $model) : status<Error>
     {
-        Q $q = $this->query();
-        return $q->rows()->store->save($model, $q->connection(), $this);
+        $st = $this->store();
+        return $st->save($model, $this);
     }
 
     /**
@@ -112,8 +110,8 @@ public interface Repository<M, Q, K>
      */
     function delete(M& $model) : status<Error>
     {
-        Q $q = $this->query();
-        return $q->rows()->store->delete($model, $q->connection(), $this);
+        $st = $this->store();
+        return $st->delete($model, $this);
     }
 
     /**
@@ -121,8 +119,8 @@ public interface Repository<M, Q, K>
      */
     function restore(M& $model) : status<Error>
     {
-        Q $q = $this->query();
-        return $q->rows()->store->restore($model, $q->connection(), $this);
+        $st = $this->store();
+        return $st->restore($model, $this);
     }
 
     /**
@@ -130,18 +128,19 @@ public interface Repository<M, Q, K>
      */
     function purge(M& $model) : status<Error>
     {
-        Q $q = $this->query();
-        return $q->rows()->store->purge($model, $q->connection(), $this);
+        $st = $this->store();
+        return $st->purge($model, $this);
     }
 
     /**
-     * Link `$model` to this repository without saving it, so `$model->save()` can insert it
-     * later.
+     * Link `$model` to this repository's session without saving it, so `$model->save()` can
+     * insert it later. A model of another session moves here, its clean state kept.
      */
     function attach(M& $model) : void
     {
-        Q $q = $this->query();
-        $q->rows()->store->attach($model);
+        $st = $this->store();
+        Session $s = $this->session();
+        $st->attach($model, $s);
     }
 
     /**
@@ -149,8 +148,9 @@ public interface Repository<M, Q, K>
      */
     function fresh(const M& $model) : result<M, Error>
     {
+        $st = $this->store();
         Q $q = $this->query();
-        return $q->scope(.all)->one($q->rows()->store->table->keyOf($model));
+        return $q->scope(.all)->one($st->table->keyOf($model));
     }
 
     /**
@@ -158,17 +158,18 @@ public interface Repository<M, Q, K>
      */
     function dirty(M& $model) : bool
     {
-        Q $q = $this->query();
-        return $q->rows()->store->dirty($model);
+        $st = $this->store();
+        return $st->dirty($model);
     }
 
     /**
-     * Run `$observer` around every write from now on, inside this repository's own hooks.
+     * Run `$observer` around every write of the model from now on, in every session, inside the
+     * repository's own hooks.
      */
     function observe(Observer<M> $observer) : void
     {
-        Q $q = $this->query();
-        $q->rows()->store->observe(mv $observer);
+        $st = $this->store();
+        $st->observe(mv $observer);
     }
 
     function all() : result<array<M>, Error>

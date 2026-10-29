@@ -110,11 +110,11 @@ test a_refused_delete_writes_nothing
 test detached_models_answer_detached
 {
     Note $n = Note($title: 'Loose');
-    assert(message($n->delete()) == 'the model is not linked to a live repository');
-    assert(message($n->restore()) == 'the model is not linked to a live repository');
-    assert(message($n->purge()) == 'the model is not linked to a live repository');
+    assert(message($n->delete()) == 'the model is not linked to a live session');
+    assert(message($n->restore()) == 'the model is not linked to a live session');
+    assert(message($n->purge()) == 'the model is not linked to a live session');
     result<Note, Error> $f = $n->fresh();
-    assert(str::from($f->failure()) == 'the model is not linked to a live repository');
+    assert(str::from($f->failure()) == 'the model is not linked to a live session');
     // nothing to differ from, and no row
     assert(!$n->dirty());
     assert(!$n->persisted());
@@ -126,8 +126,8 @@ test an_insert_on_postgres_without_a_returned_row_is_missing
     $fake = carbon::fake::Driver<hydrahon::Postgres>();
     $fake->rows([])->rows([[Value::from('seven')]]);
     carbon::Db $db = carbon::Db($fake);
-    $db->register(fixtures::NoteRepository($db->connection()));
-    fixtures::NoteRepository $notes = $db->repo<fixtures::NoteRepository>();
+    guard $db->register<fixtures::NoteRepository>();
+    fixtures::NoteRepository $notes = guard $db->session()->repo<fixtures::NoteRepository>();
     result<Note, Error> $none = $notes->create(Note($title: 'Pg'));
     assert(str::from($none->failure()) == 'no matching row');
     Note $n = Note($title: 'Pg');
@@ -207,15 +207,15 @@ test a_count_that_is_no_number_is_a_column_error
  */
 class Refuser : carbon::Observer<Note>
 {
-    public function before(Event $event, Note& $model) : status<Error>
+    public function before(carbon::Session $session, Event $event, Note& $model) : status<Error>
     {
         if ($event == Event::deleting) {
-            return .error(.refused('not today'));
+            return .error(.refused(carbon::Refusal('not today')));
         }
         return .ok();
     }
 
-    public function after(Event $event, const Note& $model) : void
+    public function after(carbon::Session $session, Event $event, const Note& $model) : void
     {
     }
 }
@@ -233,13 +233,13 @@ class Visits
  */
 class Lowercase : carbon::Observer<Setting>
 {
-    public function before(Event $event, Setting& $model) : status<Error>
+    public function before(carbon::Session $session, Event $event, Setting& $model) : status<Error>
     {
         $model->name = str::lower($model->name);
         return .ok();
     }
 
-    public function after(Event $event, const Setting& $model) : void
+    public function after(carbon::Session $session, Event $event, const Setting& $model) : void
     {
     }
 }

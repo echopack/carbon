@@ -19,6 +19,12 @@ public struct Model
     public array<Relation> $relations;
 
     /**
+     * The `#[carbon::version]` field, empty when the model has none: an update or delete only
+     * touches the row while it holds the model's version, and an update writes the next one.
+     */
+    public string $version = '';
+
+    /**
      * The query type: the module's struct conforming to `carbon::Query<Model, …>`, or the one
      * carbongen writes, `PostQuery`.
      */
@@ -131,7 +137,7 @@ public struct Model
     {
         string $handle = $this->qualifiedHandle();
         string $key = $this->key()->field();
-        return "{$this->qualified}, {$key}, {$handle}, {$this->repository}";
+        return "{$this->qualified}, {$key}, {$handle}";
     }
 
     /**
@@ -172,12 +178,12 @@ public struct Model
     }
 
     /**
-     * The interface that gives a repository `load()`: `blog::Post` gets `PostLoading`.
+     * The interface every repository of the model names: `blog::Post` gets `PostWiring`.
      */
-    public const function loadingInterface() : string
+    public const function wiringInterface() : string
     {
         $local = Names::local($this->qualified);
-        return "{$local}Loading";
+        return "{$local}Wiring";
     }
 
     public const function column(const string& $property) : Column?

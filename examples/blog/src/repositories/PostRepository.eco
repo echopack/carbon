@@ -1,13 +1,8 @@
 namespace blog;
 
-public class PostRepository : carbon::Repository<Post, PostQuery, int64>, PostLoading
+public struct PostRepository : carbon::Repository<Post, PostQuery, int64>, PostWiring
 {
-    public carbon::Connection $db;
-
-    public function query() : PostQuery
-    {
-        return PostQuery($this->db);
-    }
+    public carbon::Session $session;
 
     /**
      * Every save trims the title; an empty one is refused.
@@ -17,7 +12,7 @@ public class PostRepository : carbon::Repository<Post, PostQuery, int64>, PostLo
         if ($event->saves()) {
             $post->title = str::trim($post->title);
             if ($post->title->empty()) {
-                return .error(.refused('a post needs a title'));
+                return .error(.refused(carbon::Refusal('a post needs a title')));
             }
         }
         return .ok();

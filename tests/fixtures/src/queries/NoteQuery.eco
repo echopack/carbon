@@ -10,9 +10,9 @@ public struct NoteQuery : carbon::Query<Note, NoteQuery>, NoteRelations<NoteQuer
     internal Trail $applied = Trail();
     internal bool $refuse = false;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = NoteRows($db);
+        $this->rows = NoteRows($session);
     }
 
     public function rows() : NoteRows&

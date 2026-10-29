@@ -1,7 +1,7 @@
 use carbon::{Error, Event, Db};
 use carbon::fake;
 use hydrahon::{Value, DateTime, Postgres};
-use fixtures::{World, Note, Tag, Setting, Mood, NoteRepository, Trail, noteRow, tagRow, failure, message, selectNotes};
+use fixtures::{World, Note, Tag, Setting, Mood, NoteRepository, ProfileRepository, DraftRepository, TagRepository, Trail, noteRow, tagRow, failure, message, selectNotes};
 
 test find_loads_a_linked_model
 {
@@ -90,8 +90,9 @@ test create_reads_the_key_through_returning_on_postgres
     $fake = fake::Driver<Postgres>();
     $fake->rows([[Value::from(77)]]);
     Db $db = Db($fake);
-    $db->register(NoteRepository($db->connection()));
-    Note $n = guard $db->repo<NoteRepository>()->create(Note($title: 'Pg'));
+    guard $db->register<NoteRepository>();
+    NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
+    Note $n = guard $notes->create(Note($title: 'Pg'));
     assert($n->id == 77);
     assert($fake->last() == 'INSERT INTO "notes" ("title", "pinned", "mood", "body", "created_at", "updated_at", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id"');
 }
@@ -137,7 +138,7 @@ test a_hand_built_model_is_detached_until_attached
     $w = World();
     Note $n = Note($title: 'Loose');
     status<Error> $s = $n->save();
-    assert(message($s) == 'the model is not linked to a live repository');
+    assert(message($s) == 'the model is not linked to a live session');
     assert($w->fake->count() == 0);
 
     $w->fake->written($insertId: 5);
@@ -153,8 +154,9 @@ test a_hand_built_model_is_detached_until_attached
 function orphan(fake::Driver<hydrahon::Mysql> $fake) : Note
 {
     Db $db = Db($fake);
-    $db->register(NoteRepository($db->connection()));
-    Note $n = guard $db->repo<NoteRepository>()->find()->one(1);
+    guard $db->register<NoteRepository>();
+    NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
+    Note $n = guard $notes->find()->one(1);
     assert($n->link->attached());
     return $n;
 }
@@ -167,7 +169,7 @@ test a_model_outlives_its_repository_safely
     assert(!$n->link->attached());
     $n->title = 'Changed';
     status<Error> $s = $n->save();
-    assert(message($s) == 'the model is not linked to a live repository');
+    assert(message($s) == 'the model is not linked to a live session');
     assert($fake->count() == 1);
 }
 
@@ -203,88 +205,59 @@ test create_refuses_a_stored_model
     assert($w->fake->count() == 1);
 }
 
-test a_registered_repository_is_reached_by_its_type
+test a_registered_repository_is_built_for_each_use
 {
     Db $db = Db(fake::Driver<hydrahon::Mysql>());
     assert(!$db->has<NoteRepository>());
-    $db->register(NoteRepository($db->connection()));
+    guard $db->register<NoteRepository>();
     assert($db->has<NoteRepository>());
-    NoteRepository $a = $db->repo<NoteRepository>();
-    NoteRepository $b = $db->repo<NoteRepository>();
-    // one repository, shared: what one caller sets, the other sees
-    $a->pinnedOnly = true;
-    assert($b->pinnedOnly);
+    NoteRepository $a = guard $db->session()->repo<NoteRepository>();
+    NoteRepository $b = guard $db->session()->repo<NoteRepository>();
+    // built by NoteRepository($session): what each keeps of its own is its own
+    $a->trail->heard[] = 'a';
+    assert($b->trail->heard->count() == 0);
     assert($a->connection() == $db->connection());
 }
 
-/**
- * Adopt notes on `$c` with a repository that is gone once this returns.
- */
-function adoptAndDrop(carbon::Connection $c) : void
-{
-    NoteRepository $first = NoteRepository($c);
-    $first->adopt();
-}
-
-test a_new_repository_adopts_once_the_old_one_is_gone
-{
-    $fake = fake::Driver<hydrahon::Mysql>();
-    carbon::Connection $c = carbon::Connection($fake);
-    adoptAndDrop($c);
-    NoteRepository $second = NoteRepository($c);
-    $second->adopt();
-    $fake->rows([noteRow(1, 'Again')]);
-    Note $n = guard $second->find()->one(1);
-    assert($n->link->attached());
-}
-
-/**
- * Two live note repositories adopting on one connection.
- */
-function adoptTwice() : void
-{
-    carbon::Connection $c = carbon::Connection(fake::Driver<hydrahon::Mysql>());
-    NoteRepository $a = NoteRepository($c);
-    $a->adopt();
-    NoteRepository $b = NoteRepository($c);
-    $b->adopt();
-}
-
-#[tests: expects death]
-test two_live_repositories_for_one_model_stop
-{
-    adoptTwice();
-}
-
-/**
- * Register two note repositories on one Db.
- */
-function registerTwice() : void
+test what_a_factory_captures_every_repository_shares
 {
     Db $db = Db(fake::Driver<hydrahon::Mysql>());
-    $db->register(NoteRepository($db->connection()));
-    $db->register(NoteRepository($db->connection()));
+    Trail $trail = Trail();
+    guard $db->register<NoteRepository>(function[$trail](carbon::Session $s) : NoteRepository {
+        return NoteRepository($s, $trail, fixtures::NoteFlags());
+    });
+    NoteRepository $a = guard $db->session()->repo<NoteRepository>();
+    NoteRepository $b = guard $db->session()->repo<NoteRepository>();
+    $a->trail->heard[] = 'shared';
+    assert($b->trail->heard->count() == 1);
 }
 
-#[tests: expects death]
-test registering_a_type_twice_stops
-{
-    registerTwice();
-}
-
-/**
- * Ask a Db for a repository nobody registered.
- */
-function askUnregistered() : void
+test registering_a_type_twice_is_refused
 {
     Db $db = Db(fake::Driver<hydrahon::Mysql>());
-    NoteRepository $none = $db->repo<NoteRepository>();
+    guard $db->register<NoteRepository>();
+    status<Error> $again = $db->register<NoteRepository>();
+    assert(message($again) == 'a repository of this type is registered on the Db already');
 }
 
-#[tests: expects death]
-test asking_for_an_unregistered_repository_stops
+test asking_for_an_unregistered_repository_is_an_error
 {
-    askUnregistered();
+    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    result<NoteRepository, Error> $none = $db->session()->repo<NoteRepository>();
+    assert(str::from($none->failure()) == 'the repository asked for is not registered on the Db');
+}
+
+test the_wiring_check_names_the_repository_left_out
+{
+    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    guard $db->register<NoteRepository>();
+    guard $db->register<ProfileRepository>();
+    guard $db->register<DraftRepository>();
+    // notes load their tags, so the tag repository is needed too
+    status<Error> $s = fixtures::Carbon::check($db);
+    assert(message($s) == 'fixtures::TagRepository is not registered on the Db');
+    guard $db->register<TagRepository>();
+    guard fixtures::Carbon::check($db);
 }
 
 test delete_is_soft_and_restore_brings_it_back
@@ -354,11 +327,11 @@ class Watcher : carbon::Observer<Note>
 {
     public Trail $trail;
 
-    public function before(Event $event, Note& $model) : status<Error>
+    public function before(carbon::Session $session, Event $event, Note& $model) : status<Error>
     {
         $this->trail->heard[] = "observer before {$event->value()}";
         if ($model->mood == Mood::grumpy) {
-            return .error(.refused('too grumpy'));
+            return .error(.refused(carbon::Refusal('too grumpy')));
         }
         if ($event == Event::creating && $model->body == null) {
             $model->body = 'filled';
@@ -366,7 +339,7 @@ class Watcher : carbon::Observer<Note>
         return .ok();
     }
 
-    public function after(Event $event, const Note& $model) : void
+    public function after(carbon::Session $session, Event $event, const Note& $model) : void
     {
         $this->trail->heard[] = "observer after {$event->value()}";
     }
@@ -423,19 +396,17 @@ test a_model_and_its_repository_save_through_the_same_hooks
     assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 2 | repo after 2 | repo before 3 | repo after 3');
 }
 
-/**
- * Reads a tag on a database where no tag repository adopted the model.
- */
-function unadopted() : void
+test a_model_read_without_its_repository_cannot_write
 {
     carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
     $fake->rows([tagRow(1, 1, 'x')]);
-    fixtures::TagQuery $q = fixtures::TagQuery(carbon::Connection($fake));
-    guard $q->get();
-}
-
-#[tests: expects death]
-test a_model_read_without_an_adopting_repository_stops
-{
-    unadopted();
+    Db $db = Db($fake);
+    // reading needs no repository; the models link to the session all the same
+    fixtures::TagQuery $q = fixtures::TagQuery($db->session());
+    array<Tag> $read = guard $q->get();
+    Tag $t = $read[0];
+    assert($t->link->attached());
+    $t->name = 'y';
+    status<Error> $s = $t->save();
+    assert(message($s) == 'the repository asked for is not registered on the Db');
 }

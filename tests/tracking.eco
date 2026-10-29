@@ -1,0 +1,75 @@
+/*
+ * What change tracking costs: a save takes one snapshot before its hooks and one after, and a
+ * read-only load keeps no copy of its rows at all.
+ */
+
+use carbon::Error;
+use fixtures::{World, Note, Tag, TagQuery, Profile, Cents, noteRow, tagRow, message};
+
+test a_save_snapshots_once_before_the_hooks_and_once_after
+{
+    $w = World();
+    $w->fake->rows([profileRow()])->written(1);
+    Profile $p = guard $w->profiles->find()->one(1);
+    Cents::$encodes = 0;
+    $p->tags[] = 'more';
+    guard $p->save();
+    // the price is not written, only snapshotted: before the hooks, and after them
+    assert(Cents::$encodes == 2);
+    // nothing changed: one snapshot tells, and nothing runs
+    Cents::$encodes = 0;
+    guard $p->save();
+    assert(Cents::$encodes == 1);
+    assert($w->fake->count() == 2);
+}
+
+test a_readonly_load_keeps_no_copy_and_refuses_writes
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'only read')]);
+    array<Note> $notes = guard $w->notes->find()->readonly()->get();
+    Note $n = $notes[0];
+    assert($n->link->readonly() && $n->persisted());
+    assert($n->link->original->values->count() == 0);
+    $n->title = 'changed';
+    // never dirty: there is no row to differ from
+    assert(!$n->dirty());
+    string $refused = 'invalid: the model was loaded read-only; load it again to write it';
+    assert(message($n->save()) == $refused);
+    assert(message($n->delete()) == $refused);
+    assert(message($n->purge()) == $refused);
+    assert($w->fake->count() == 1);
+}
+
+test a_readonly_load_reads_its_relations_readonly
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')])->rows([tagRow(10, 1, 'x')]);
+    array<Note> $notes = guard $w->notes->find()->readonly()->withTags()->get();
+    Tag $t = $notes[0]->tags->get()[0];
+    assert($t->link->readonly());
+    assert(message($t->save()) == 'invalid: the model was loaded read-only; load it again to write it');
+}
+
+test streaming_can_be_readonly_too
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
+    fixtures::Trail $seen = fixtures::Trail();
+    guard $w->notes->find()->readonly()->each(function[$seen](Note $n) : status<Error> {
+        if ($n->link->readonly()) {
+            $seen->heard[] = $n->title;
+        }
+        return .ok();
+    });
+    assert(str::join($seen->heard, ',') == 'a,b');
+}
+
+test a_model_loaded_to_write_is_not_readonly
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')]);
+    Note $n = guard $w->notes->find()->one(1);
+    assert(!$n->link->readonly());
+    assert($n->link->original->values->count() > 0);
+}

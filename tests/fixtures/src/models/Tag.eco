@@ -3,7 +3,7 @@ namespace fixtures;
 #[carbon::model: 'tags']
 public class Tag : carbon::Model<Tag, TagRepository>
 {
-    public carbon::Link<TagRepository> $link = .detached();
+    public carbon::Link $link = .detached();
 
     #[carbon::key]
     public int64 $id = 0;
@@ -13,7 +13,7 @@ public class Tag : carbon::Model<Tag, TagRepository>
     #[carbon::belongsTo: 'noteId']
     public carbon::One<Note> $note = .unloaded();
 
-    public function link() : carbon::Link<TagRepository>&
+    public function link() : carbon::Link&
     {
         return $this->link;
     }

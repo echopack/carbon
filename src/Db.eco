@@ -1,38 +1,80 @@
 namespace carbon;
 
 /**
- * An app's way into its database: the connection everything runs on, and the repositories
- * registered on it, one per type, owned for as long as the `Db` lives. A repository is built
- * with the connection and registered once at startup; from then on it is reached by its type.
+ * An app's way into its database: the connection everything runs on, the repositories
+ * registered on it (one per type) and the store of every model. Built once at startup, and
+ * worked with through sessions.
  *
  * ```echo
  * Db $db = Db($driver);
- * $db->register(UserRepository($db->connection()));
- * $db->register(PostRepository($db->connection(), $mailer));
+ * guard $db->register<UserRepository>();
+ * guard $db->register<PostRepository>(function[$mailer](Session $s) : PostRepository {
+ *     return PostRepository($s, $mailer);
+ * });
+ * guard blog::Carbon::check($db);
  *
- * Post? $post = guard $db->repo<PostRepository>()->get(42);
+ * PostRepository $posts = guard $db->session()->repo<PostRepository>();
+ * Post? $post = guard $posts->get(42);
  * ```
  *
- * Repositories and queries hold the `Connection`, never the `Db`, so nothing points back at
- * what owns them. A relation loads its models through the repository registered for them.
+ * A repository is registered by type, with what builds it; every session builds its own. A
+ * relation loads its models through the repository registered for them. Transactions are a
+ * session's: `$session->transaction(...)`.
+ *
+ * Until sessions take their connections from a pool, every session of a `Db` shares its one
+ * connection: two threads that open transactions on it at once step on each other.
  */
 public class Db
 {
     internal Connection $connection;
-    internal map<type_id, erased> $repos = [];
+    internal Registry $registry;
+    internal Session $root;
 
     public constructor(Driver $driver)
     {
         $this->connection = Connection($driver);
+        $this->registry = Registry();
+        $this->root = Session($this->registry, $this->connection);
     }
 
     public constructor(Driver $driver, clock: Clock $clock)
     {
         $this->connection = Connection($driver, clock: $clock);
+        $this->registry = Registry();
+        $this->root = Session($this->registry, $this->connection);
     }
 
     /**
-     * What repositories are built with: `PostRepository($db->connection())`.
+     * The session that lives as long as the `Db`: for scripts, startup work and anything that
+     * belongs to no request.
+     */
+    public function session() : Session
+    {
+        return $this->root;
+    }
+
+    /**
+     * A new session carrying `$context`, for one request or one job: hooks and observers of
+     * every write in it read the context with `$session->get<C>()`. It lives as long as the
+     * app holds it, and the models it loads link to it.
+     */
+    public function scoped<C : class>(C $context) : Session
+    {
+        Session $s = Session($this->registry, $this->connection);
+        $s->put<C>($context);
+        return $s;
+    }
+
+    /**
+     * A new session carrying nothing yet; `put` gives it context.
+     */
+    public function scoped() : Session
+    {
+        return Session($this->registry, $this->connection);
+    }
+
+    /**
+     * The connection sessions run on.
      */
     public function connection() : Connection
     {
@@ -40,45 +82,46 @@ public class Db
     }
 
     /**
-     * Keep `$repo` as the repository of its type and make it the one its models link to.
-     * Registering a second repository of one type is a wiring bug, and stops the program in
-     * every build.
+     * Register repository type `R`, built for each session as `R($session)`: a repository that
+     * needs nothing but its session. A second registration of one type is refused with
+     * `.registered`.
      */
-    public function register<R : class>(R $repo) : void
+    public function register<R>() : status<Error>
     {
-        type_id $id = type_id<R>();
-        if ($this->repos->has($id)) {
-            die('carbon: a repository of this type is already registered on this Db');
-        }
-        $repo->adopt();
-        $this->repos[$id] = erased::from(Held<R>($repo));
+        return $this->register<R>(function(Session $s) : R {
+            return R($s);
+        });
     }
 
     /**
-     * The repository registered for type `R`. Asking for one that never was is a wiring bug,
-     * and stops the program in every build; `has<R>()` asks first.
+     * Register repository type `R`, built for each session by `$make`, which hands it what it
+     * needs besides the session: `function[$mailer](Session $s) : PostRepository { ... }`. The
+     * dependencies `$make` captures are shared by every repository it builds.
      */
-    public function repo<R : class>() : R
+    public function register<R>(function<R(Session)> $make) : status<Error>
     {
-        type_id $id = type_id<R>();
-        if (!$this->repos->has($id)) {
-            die('carbon: no repository of this type is registered on this Db');
+        if ($this->registry->has(type_id<R>())) {
+            return .error(.registered('a repository of this type'));
         }
-        erased $held = $this->repos->get($id);
-        Held<R> $entry;
-        // sound: only register writes the key, always with this type
-        unsafe {
-            $entry = assume<Held<R>>($held);
-        }
-        return $entry->value;
+        $this->registry->factory<R>($make);
+        return .ok();
     }
 
     /**
      * Whether a repository of type `R` is registered.
      */
-    public const function has<R : class>() : bool
+    public const function has<R>() : bool
     {
-        return $this->repos->has(type_id<R>());
+        return $this->registry->has(type_id<R>());
+    }
+
+    /**
+     * The store of model `M`, made now if it was not yet; the generated `Carbon::check` makes
+     * every one at startup.
+     */
+    public function store<M, K, S>() : Store<M, K, S>
+    {
+        return $this->registry->store<M, K, S>();
     }
 
     /**
@@ -104,24 +147,6 @@ public class Db
     public function listen(Listener $listener) : void
     {
         $this->connection->listen($listener);
-    }
-
-    /**
-     * Run `$work` in a transaction: commit when it succeeds, roll back when it fails and hand
-     * back its error. Transactions do not nest.
-     */
-    public function transaction(function<status<Error>()> $work) : status<Error>
-    {
-        return $this->connection->transaction($work);
-    }
-
-    /**
-     * Run `$work` in a transaction and hand back what it made: committed when it succeeds,
-     * rolled back when it fails.
-     */
-    public function transaction<T>(function<result<T, Error>()> $work) : result<T, Error>
-    {
-        return $this->connection->produce<T>($work);
     }
 
     /**

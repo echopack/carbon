@@ -5,7 +5,7 @@ namespace blog;
 /**
  * The columns of `comments` and how `Comment` maps onto them.
  */
-public class CommentTable : hydrahon::Source, carbon::Schema<blog::Comment, int64, blog::CommentRepository>
+public class CommentTable : hydrahon::Source, carbon::Schema<blog::Comment, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('comments', 'id');
     public static hydrahon::Term<int64> $postId = carbon::select::column<int64>('comments', 'post_id');
@@ -131,7 +131,7 @@ public class CommentTable : hydrahon::Source, carbon::Schema<blog::Comment, int6
         $m->id = $key;
     }
 
-    public const function link(blog::Comment& $m) : carbon::Link<blog::CommentRepository>&
+    public const function link(blog::Comment& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -192,7 +192,7 @@ public class CommentTableAlias : hydrahon::Source
 /**
  * What a query for `Comment` models gathers: the field a query struct keeps.
  */
-public type CommentRows = carbon::Rows<blog::Comment, int64, blog::CommentTable, blog::CommentRepository>;
+public type CommentRows = carbon::Rows<blog::Comment, int64, blog::CommentTable>;
 
 /**
  * A query for `Comment` models. Declare a struct conforming to
@@ -202,9 +202,9 @@ public struct CommentQuery : carbon::Query<blog::Comment, CommentQuery>, Comment
 {
     internal CommentRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = CommentRows($db);
+        $this->rows = CommentRows($session);
     }
 
     public function rows() : CommentRows&
@@ -218,11 +218,11 @@ public struct CommentQuery : carbon::Query<blog::Comment, CommentQuery>, Comment
  */
 public class CommentPostRelation : carbon::Eager<blog::Comment>
 {
-    internal carbon::relation::Fetch<blog::Post, blog::PostQuery> $fetch;
+    internal carbon::relation::Fetch<blog::Post, blog::PostQuery, blog::PostRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<blog::Post, blog::PostQuery>();
+        $this->fetch = carbon::relation::Fetch<blog::Post, blog::PostQuery, blog::PostRepository>('blog::PostRepository');
     }
 
     /**
@@ -258,24 +258,50 @@ public class CommentPostRelation : carbon::Eager<blog::Comment>
         return $this;
     }
 
-    public function load(array<blog::Comment>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<blog::Comment>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
+        bool $reuse = $this->fetch->plain();
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
-            $keys->add($m->postId);
+            blog::Post? $held = null;
+            if ($reuse) {
+                $held = $seen->find<int64, blog::Post>($m->postId);
+            }
+            if ($held == null) {
+                $keys->add($m->postId);
+            }
         }
         array<blog::Post> $found = [];
         if (!$keys->empty()) {
-            blog::PostQuery $q = $this->fetch->query($db, blog::PostTable::$id in $keys->list());
+            blog::PostQuery $q = guard $this->fetch->query($session, blog::PostTable::$id in $keys->list(), $seen) else ($e) { return .error($e); }
             array<blog::Post> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, blog::Post> $by = carbon::relation::Index<int64, blog::Post>();
         foreach ($found as const &$f) {
+            blog::Post? $had = $seen->find<int64, blog::Post>($f->id);
             $by->add($f->id, $f);
+            if ($had == null) {
+                $seen->add<int64, blog::Post>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
-            $m->post->set($by->first($m->postId));
+            int64 $k = $m->postId;
+            blog::Post? $fresh = $by->first($k);
+            if ($fresh != null) {
+                $m->post->set($fresh);
+                continue;
+            }
+            blog::Post? $shared = null;
+            if ($reuse) {
+                $shared = $seen->find<int64, blog::Post>($k);
+            }
+            if ($shared != null) {
+                blog::Post $s = guard $shared;
+                $m->post->share($s);
+            } else {
+                $m->post->set(null);
+            }
         }
         return .ok();
     }
@@ -315,9 +341,9 @@ public struct CommentLoad : CommentRelations<CommentLoad>
 {
     internal carbon::Fill<blog::Comment> $fill;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->fill = carbon::Fill<blog::Comment>($db);
+        $this->fill = carbon::Fill<blog::Comment>($session);
     }
 
     /**
@@ -336,29 +362,52 @@ public struct CommentLoad : CommentRelations<CommentLoad>
      */
     public function into(array<blog::Comment>& $models) : status<carbon::Error>
     {
-        return $this->fill->into($models);
+        // the models in hand are the load's first: relations back to them share them
+        carbon::Loaded $seen = carbon::Loaded();
+        foreach ($models as const &$m) {
+            $seen->add<int64, blog::Comment>($m->id, $m);
+        }
+        return $this->fill->into($models, $seen);
     }
 }
 
 /**
- * `load()` for the repository of `Comment` models. A repository written by hand names it:
- * `CommentRepository : carbon::Repository<Comment, …>, CommentLoading`.
+ * What a repository of `Comment` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `CommentRepository : carbon::Repository<Comment, …>, CommentWiring`.
  */
-public interface CommentLoading
+public interface CommentWiring
 {
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Comment` models, shared by every session.
+     */
+    function store() : carbon::Store<blog::Comment, int64, blog::CommentTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<blog::Comment, int64, blog::CommentTable>();
+    }
+
     /**
      * Start filling the relations of models already in hand.
      */
     function load() : CommentLoad
     {
-        return CommentLoad($this->connection());
+        return CommentLoad($this->session());
     }
 }
 
 /**
  * The columns of `posts` and how `Post` maps onto them.
  */
-public class PostTable : hydrahon::Source, carbon::Schema<blog::Post, int64, blog::PostRepository>
+public class PostTable : hydrahon::Source, carbon::Schema<blog::Post, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('posts', 'id');
     public static hydrahon::Term<int64> $authorId = carbon::select::column<int64>('posts', 'author_id');
@@ -563,7 +612,7 @@ public class PostTable : hydrahon::Source, carbon::Schema<blog::Post, int64, blo
         $m->id = $key;
     }
 
-    public const function link(blog::Post& $m) : carbon::Link<blog::PostRepository>&
+    public const function link(blog::Post& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -640,18 +689,18 @@ public class PostTableAlias : hydrahon::Source
 /**
  * What a query for `Post` models gathers: the field a query struct keeps.
  */
-public type PostRows = carbon::Rows<blog::Post, int64, blog::PostTable, blog::PostRepository>;
+public type PostRows = carbon::Rows<blog::Post, int64, blog::PostTable>;
 
 /**
  * The `author` of a batch of `Post` models, loaded with one query.
  */
 public class PostAuthorRelation : carbon::Eager<blog::Post>
 {
-    internal carbon::relation::Fetch<blog::User, blog::UserQuery> $fetch;
+    internal carbon::relation::Fetch<blog::User, blog::UserQuery, blog::UserRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<blog::User, blog::UserQuery>();
+        $this->fetch = carbon::relation::Fetch<blog::User, blog::UserQuery, blog::UserRepository>('blog::UserRepository');
     }
 
     /**
@@ -687,24 +736,50 @@ public class PostAuthorRelation : carbon::Eager<blog::Post>
         return $this;
     }
 
-    public function load(array<blog::Post>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<blog::Post>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
+        bool $reuse = $this->fetch->plain();
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
-            $keys->add($m->authorId);
+            blog::User? $held = null;
+            if ($reuse) {
+                $held = $seen->find<int64, blog::User>($m->authorId);
+            }
+            if ($held == null) {
+                $keys->add($m->authorId);
+            }
         }
         array<blog::User> $found = [];
         if (!$keys->empty()) {
-            blog::UserQuery $q = $this->fetch->query($db, blog::UserTable::$id in $keys->list());
+            blog::UserQuery $q = guard $this->fetch->query($session, blog::UserTable::$id in $keys->list(), $seen) else ($e) { return .error($e); }
             array<blog::User> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, blog::User> $by = carbon::relation::Index<int64, blog::User>();
         foreach ($found as const &$f) {
+            blog::User? $had = $seen->find<int64, blog::User>($f->id);
             $by->add($f->id, $f);
+            if ($had == null) {
+                $seen->add<int64, blog::User>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
-            $m->author->set($by->first($m->authorId));
+            int64 $k = $m->authorId;
+            blog::User? $fresh = $by->first($k);
+            if ($fresh != null) {
+                $m->author->set($fresh);
+                continue;
+            }
+            blog::User? $shared = null;
+            if ($reuse) {
+                $shared = $seen->find<int64, blog::User>($k);
+            }
+            if ($shared != null) {
+                blog::User $s = guard $shared;
+                $m->author->share($s);
+            } else {
+                $m->author->set(null);
+            }
         }
         return .ok();
     }
@@ -715,11 +790,11 @@ public class PostAuthorRelation : carbon::Eager<blog::Post>
  */
 public class PostCommentsRelation : carbon::Eager<blog::Post>
 {
-    internal carbon::relation::Fetch<blog::Comment, blog::CommentQuery> $fetch;
+    internal carbon::relation::Fetch<blog::Comment, blog::CommentQuery, blog::CommentRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<blog::Comment, blog::CommentQuery>();
+        $this->fetch = carbon::relation::Fetch<blog::Comment, blog::CommentQuery, blog::CommentRepository>('blog::CommentRepository');
     }
 
     /**
@@ -755,7 +830,7 @@ public class PostCommentsRelation : carbon::Eager<blog::Post>
         return $this;
     }
 
-    public function load(array<blog::Post>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<blog::Post>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
@@ -763,13 +838,17 @@ public class PostCommentsRelation : carbon::Eager<blog::Post>
         }
         array<blog::Comment> $found = [];
         if (!$keys->empty()) {
-            blog::CommentQuery $q = $this->fetch->query($db, blog::CommentTable::$postId in $keys->list());
+            blog::CommentQuery $q = guard $this->fetch->query($session, blog::CommentTable::$postId in $keys->list(), $seen) else ($e) { return .error($e); }
             array<blog::Comment> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, blog::Comment> $by = carbon::relation::Index<int64, blog::Comment>();
         foreach ($found as const &$f) {
+            blog::Comment? $had = $seen->find<int64, blog::Comment>($f->id);
             $by->add($f->postId, $f);
+            if ($had == null) {
+                $seen->add<int64, blog::Comment>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
             $m->comments->set($by->all($m->id));
@@ -829,9 +908,9 @@ public struct PostLoad : PostRelations<PostLoad>
 {
     internal carbon::Fill<blog::Post> $fill;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->fill = carbon::Fill<blog::Post>($db);
+        $this->fill = carbon::Fill<blog::Post>($session);
     }
 
     /**
@@ -850,29 +929,52 @@ public struct PostLoad : PostRelations<PostLoad>
      */
     public function into(array<blog::Post>& $models) : status<carbon::Error>
     {
-        return $this->fill->into($models);
+        // the models in hand are the load's first: relations back to them share them
+        carbon::Loaded $seen = carbon::Loaded();
+        foreach ($models as const &$m) {
+            $seen->add<int64, blog::Post>($m->id, $m);
+        }
+        return $this->fill->into($models, $seen);
     }
 }
 
 /**
- * `load()` for the repository of `Post` models. A repository written by hand names it:
- * `PostRepository : carbon::Repository<Post, …>, PostLoading`.
+ * What a repository of `Post` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `PostRepository : carbon::Repository<Post, …>, PostWiring`.
  */
-public interface PostLoading
+public interface PostWiring
 {
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Post` models, shared by every session.
+     */
+    function store() : carbon::Store<blog::Post, int64, blog::PostTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<blog::Post, int64, blog::PostTable>();
+    }
+
     /**
      * Start filling the relations of models already in hand.
      */
     function load() : PostLoad
     {
-        return PostLoad($this->connection());
+        return PostLoad($this->session());
     }
 }
 
 /**
  * The columns of `users` and how `User` maps onto them.
  */
-public class UserTable : hydrahon::Source, carbon::Schema<blog::User, int64, blog::UserRepository>
+public class UserTable : hydrahon::Source, carbon::Schema<blog::User, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('users', 'id');
     public static hydrahon::Term<string> $email = carbon::select::column<string>('users', 'email');
@@ -1018,7 +1120,7 @@ public class UserTable : hydrahon::Source, carbon::Schema<blog::User, int64, blo
         $m->id = $key;
     }
 
-    public const function link(blog::User& $m) : carbon::Link<blog::UserRepository>&
+    public const function link(blog::User& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -1084,7 +1186,7 @@ public class UserTableAlias : hydrahon::Source
 /**
  * What a query for `User` models gathers: the field a query struct keeps.
  */
-public type UserRows = carbon::Rows<blog::User, int64, blog::UserTable, blog::UserRepository>;
+public type UserRows = carbon::Rows<blog::User, int64, blog::UserTable>;
 
 /**
  * A query for `User` models. Declare a struct conforming to
@@ -1094,9 +1196,9 @@ public struct UserQuery : carbon::Query<blog::User, UserQuery>, UserRelations<Us
 {
     internal UserRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = UserRows($db);
+        $this->rows = UserRows($session);
     }
 
     public function rows() : UserRows&
@@ -1110,11 +1212,11 @@ public struct UserQuery : carbon::Query<blog::User, UserQuery>, UserRelations<Us
  */
 public class UserPostsRelation : carbon::Eager<blog::User>
 {
-    internal carbon::relation::Fetch<blog::Post, blog::PostQuery> $fetch;
+    internal carbon::relation::Fetch<blog::Post, blog::PostQuery, blog::PostRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<blog::Post, blog::PostQuery>();
+        $this->fetch = carbon::relation::Fetch<blog::Post, blog::PostQuery, blog::PostRepository>('blog::PostRepository');
     }
 
     /**
@@ -1150,7 +1252,7 @@ public class UserPostsRelation : carbon::Eager<blog::User>
         return $this;
     }
 
-    public function load(array<blog::User>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<blog::User>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
@@ -1158,13 +1260,17 @@ public class UserPostsRelation : carbon::Eager<blog::User>
         }
         array<blog::Post> $found = [];
         if (!$keys->empty()) {
-            blog::PostQuery $q = $this->fetch->query($db, blog::PostTable::$authorId in $keys->list());
+            blog::PostQuery $q = guard $this->fetch->query($session, blog::PostTable::$authorId in $keys->list(), $seen) else ($e) { return .error($e); }
             array<blog::Post> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, blog::Post> $by = carbon::relation::Index<int64, blog::Post>();
         foreach ($found as const &$f) {
+            blog::Post? $had = $seen->find<int64, blog::Post>($f->id);
             $by->add($f->authorId, $f);
+            if ($had == null) {
+                $seen->add<int64, blog::Post>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
             $m->posts->set($by->all($m->id));
@@ -1207,9 +1313,9 @@ public struct UserLoad : UserRelations<UserLoad>
 {
     internal carbon::Fill<blog::User> $fill;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->fill = carbon::Fill<blog::User>($db);
+        $this->fill = carbon::Fill<blog::User>($session);
     }
 
     /**
@@ -1228,22 +1334,45 @@ public struct UserLoad : UserRelations<UserLoad>
      */
     public function into(array<blog::User>& $models) : status<carbon::Error>
     {
-        return $this->fill->into($models);
+        // the models in hand are the load's first: relations back to them share them
+        carbon::Loaded $seen = carbon::Loaded();
+        foreach ($models as const &$m) {
+            $seen->add<int64, blog::User>($m->id, $m);
+        }
+        return $this->fill->into($models, $seen);
     }
 }
 
 /**
- * `load()` for the repository of `User` models. A repository written by hand names it:
- * `UserRepository : carbon::Repository<User, …>, UserLoading`.
+ * What a repository of `User` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `UserRepository : carbon::Repository<User, …>, UserWiring`.
  */
-public interface UserLoading
+public interface UserWiring
 {
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `User` models, shared by every session.
+     */
+    function store() : carbon::Store<blog::User, int64, blog::UserTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<blog::User, int64, blog::UserTable>();
+    }
+
     /**
      * Start filling the relations of models already in hand.
      */
     function load() : UserLoad
     {
-        return UserLoad($this->connection());
+        return UserLoad($this->session());
     }
 }
 
@@ -1311,4 +1440,42 @@ operator (hydrahon::Values& $into)[const StatusColumn& $column] = (blog::Status 
 {
     int64 $raw = $case->value() as int64;
     $into[$column->term] = $raw;
+}
+
+/**
+ * The wiring of the models of this namespace, registered and checked in one go.
+ */
+public struct Carbon
+{
+    /**
+     * Register the repositories carbongen wrote for these models; the ones the module declares
+     * are registered by the app, with what they need.
+     */
+    public static function register(carbon::Db $db) : status<carbon::Error>
+    {
+        return .ok();
+    }
+
+    /**
+     * Whether every repository these models need is registered on `$db`: their own, and the
+     * ones their relations load through. Run it once after registering, so a repository left
+     * out stops the app at startup, not on the first request that reaches it. It also makes
+     * the store of every model, so none is made while requests run.
+     */
+    public static function check(carbon::Db $db) : status<carbon::Error>
+    {
+        if (!$db->has<blog::CommentRepository>()) {
+            return .error(.unregistered('blog::CommentRepository'));
+        }
+        if (!$db->has<blog::PostRepository>()) {
+            return .error(.unregistered('blog::PostRepository'));
+        }
+        if (!$db->has<blog::UserRepository>()) {
+            return .error(.unregistered('blog::UserRepository'));
+        }
+        $db->store<blog::Comment, int64, blog::CommentTable>();
+        $db->store<blog::Post, int64, blog::PostTable>();
+        $db->store<blog::User, int64, blog::UserTable>();
+        return .ok();
+    }
 }

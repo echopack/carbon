@@ -3,47 +3,70 @@ namespace carbon;
 use carbon::change::Snapshot;
 
 /**
- * A model's tie to the repository that adopted it: a weak reference (models never keep their
- * repository alive), whether the row exists, and the column values as last loaded or saved. A
- * model built by hand starts `detached()`; it is linked when it is loaded, created or attached.
+ * A model's tie to the session it was loaded, created or attached in: a weak reference (models
+ * never keep a session alive), whether the row exists, and the column values as last loaded or
+ * saved. A model built by hand starts `detached()`; it is linked when it is loaded, created or
+ * attached.
  *
- * `R` is the model's `Repository`; the defaults of `carbon::Model` reach it through `repo()`, so
- * `$post->save()` runs the repository's hooks like `$posts->save($post)` does.
+ * The defaults of `carbon::Model` reach the model's repository through `bound()`, built for that
+ * session, so `$post->save()` runs the repository's hooks with the session's context like
+ * `$posts->save($post)` does.
  */
-public struct Link<R>
+public struct Link
 {
-    internal weak<R> $repo;
+    internal weak<Session> $session;
     internal bool $persisted;
+    internal bool $readonly;
     internal Snapshot $original;
 
     public constructor()
     {
-        $this->repo = null;
+        $this->session = null;
         $this->persisted = false;
+        $this->readonly = false;
         $this->original = Snapshot();
     }
 
-    public static function detached() : Link<R>
+    public static function detached() : Link
     {
-        return Link<R>();
+        return Link();
     }
 
     /**
-     * The repository, while it is alive.
+     * The session, while it is alive; `.detached` once it is gone or when there never was one.
      */
-    public const function repo() : result<R, Error>
+    public const function session() : result<Session, Error>
     {
-        R $r = guard strong($this->repo) else { return .error(.detached); }
-        return .ok($r);
+        Session $s = guard strong($this->session) else { return .error(.detached); }
+        return .ok($s);
     }
 
     /**
-     * Whether the repository is still alive.
+     * The repository of type `R` registered on the session's `Db`, bound to that session:
+     * `.detached` once the session is gone, `.unregistered` when the `Db` has none.
+     */
+    public const function bound<R>() : result<R, Error>
+    {
+        Session $s = guard strong($this->session) else { return .error(.detached); }
+        return $s->repo<R>();
+    }
+
+    /**
+     * Whether the session is still alive.
      */
     public const function attached() : bool
     {
-        R? $r = strong($this->repo);
-        return $r != null;
+        Session? $s = strong($this->session);
+        return $s != null;
+    }
+
+    /**
+     * Whether the model was loaded read-only: it keeps no copy of its row, and writing it is
+     * refused.
+     */
+    public const function readonly() : bool
+    {
+        return $this->readonly;
     }
 
     /**

@@ -109,7 +109,7 @@ test transaction_commits
 {
     $fake = fake::Driver<Mysql>();
     Db $db = Db($fake);
-    guard $db->transaction(function[$db]() : status<Error> {
+    guard $db->session()->transaction(function[$db]() : status<Error> {
         assert($db->inTransaction());
         return .ok();
     });
@@ -121,8 +121,8 @@ test transaction_rolls_back_and_keeps_the_error
 {
     $fake = fake::Driver<Mysql>();
     Db $db = Db($fake);
-    status<Error> $s = $db->transaction(function() : status<Error> {
-        return .error(.refused('no'));
+    status<Error> $s = $db->session()->transaction(function() : status<Error> {
+        return .error(.refused(carbon::Refusal('no')));
     });
     assert($s->failed());
     assert(str::from($s->failure()) == 'refused: no');
@@ -134,8 +134,8 @@ test transaction_does_not_nest
 {
     $fake = fake::Driver<Mysql>();
     Db $db = Db($fake);
-    status<Error> $s = $db->transaction(function[$db]() : status<Error> {
-        return $db->transaction(function() : status<Error> { return .ok(); });
+    status<Error> $s = $db->session()->transaction(function[$db]() : status<Error> {
+        return $db->session()->transaction(function() : status<Error> { return .ok(); });
     });
     assert($s->failed());
     assert(str::from($s->failure()) == 'a transaction is already open');
@@ -151,7 +151,7 @@ test log_hears_every_statement
     $db->listen($log);
     hydrahon::Table $t = hydrahon::Table(name: 'things');
     guard $db->connection()->exec(hydrahon::Delete(from: $t));
-    guard $db->transaction(function() : status<Error> { return .ok(); });
+    guard $db->session()->transaction(function() : status<Error> { return .ok(); });
     guard $db->run('TRUNCATE things');
     assert($log->count() == 4);
     assert(str::join($log->texts(), ' | ') == 'DELETE FROM `things` | BEGIN | COMMIT | TRUNCATE things');
@@ -162,14 +162,14 @@ test a_transaction_hands_back_what_it_made
 {
     $fake = fake::Driver<Mysql>();
     Db $db = Db($fake);
-    result<int64, Error> $made = $db->transaction(function() : result<int64, Error> {
+    result<int64, Error> $made = $db->session()->transaction(function() : result<int64, Error> {
         return .ok(42);
     });
     int64 $n = guard $made;
     assert($n == 42);
     assert(str::join($fake->texts(), ' | ') == 'BEGIN | COMMIT');
-    result<int64, Error> $lost = $db->transaction(function() : result<int64, Error> {
-        return .error(.refused('no'));
+    result<int64, Error> $lost = $db->session()->transaction(function() : result<int64, Error> {
+        return .error(.refused(carbon::Refusal('no')));
     });
     assert($lost->failed() && str::from($lost->failure()) == 'refused: no');
     assert(str::join($fake->texts(), ' | ') == 'BEGIN | COMMIT | BEGIN | ROLLBACK');

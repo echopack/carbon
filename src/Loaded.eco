@@ -1,0 +1,70 @@
+namespace carbon;
+
+/**
+ * The models one load has handed out so far, by type and key: a query, its relations and
+ * theirs. A relation that asks for a model this load already holds reuses it rather than
+ * reading a copy, so `$comment->post` is the very post the comments were loaded for.
+ *
+ * Every model a load reads anew is held strongly by the slot it fills; one it already held
+ * is held weakly. Strong references so only ever point from a model to one read after it, and
+ * no two models keep each other alive.
+ */
+public class Loaded
+{
+    internal map<type_id, erased> $byType = [];
+
+    /**
+     * Whether the load is read-only: every relation of it reads its models read-only too.
+     */
+    public bool $readonly = false;
+
+    public constructor()
+    {
+    }
+
+    public constructor(readonly: bool $readonly)
+    {
+        $this->readonly = $readonly;
+    }
+
+    /**
+     * Keep `$model`, of type `T` with key `$key`, unless this load holds one with that key
+     * already: the first one read stays the one handed out.
+     */
+    public function add<K, T>(K $key, T $model) : void
+    {
+        Held<map<K, T>> $held = $this->models<K, T>();
+        if (!$held->value->has($key)) {
+            $held->value[$key] = $model;
+        }
+    }
+
+    /**
+     * The `T` with key `$key` this load holds, null when it holds none.
+     */
+    public function find<K, T>(K $key) : T?
+    {
+        Held<map<K, T>> $held = $this->models<K, T>();
+        if (!$held->value->has($key)) {
+            return null;
+        }
+        T $model = $held->value->get($key);
+        return $model;
+    }
+
+    internal function models<K, T>() : Held<map<K, T>>
+    {
+        type_id $id = type_id<T>();
+        if (!$this->byType->has($id)) {
+            map<K, T> $none = [];
+            $this->byType[$id] = erased::from(Held<map<K, T>>($none));
+        }
+        erased $held = $this->byType->get($id);
+        Held<map<K, T>> $entry;
+        // sound: only this method writes the key, always for this T, whose key type is K
+        unsafe {
+            $entry = assume<Held<map<K, T>>>($held);
+        }
+        return $entry;
+    }
+}

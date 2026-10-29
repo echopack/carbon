@@ -3,11 +3,12 @@
  * `hydrahon::Source` and `carbon::Schema`, with every column as a static
  * (`PostTable::$title`), and a class for the table under an alias whose
  * fields are the columns (`PostTable::alias('p')->title`); the `PostRows`
- * alias a query keeps; the query and repository a module leaves out; one
- * `carbon::Eager` class per relation, the `PostRelations` interface of their
- * `with…()` methods, the `PostLoad` struct and the `PostLoading` interface
- * behind a repository's `load()`; and a columns-only table class per
- * `#[carbon::table]`.
+ * alias a query keeps; the query and repository a module leaves out; the
+ * `PostWiring` interface every repository names; one `carbon::Eager` class per
+ * relation, the `PostRelations` interface of their `with…()` methods and the
+ * `PostLoad` struct behind a repository's `load()`; a columns-only table class
+ * per `#[carbon::table]`; and per namespace, `Carbon` to register and check it
+ * all.
  */
 
 namespace carbongen;
@@ -52,8 +53,74 @@ public struct Emitter
             foreach ($this->schema->enumColumns($space) as const &$c) {
                 $this->enumerated($c, $out);
             }
+            $this->checks($space, $out);
         }
         return $out;
+    }
+
+    /**
+     * The `Carbon` struct of namespace `$space`: `register($db)` for the repositories carbongen
+     * wrote, and `check($db)`, which finds every repository its models need that is not
+     * registered, at startup rather than on the first request that reaches it. Nothing when the
+     * namespace has no model.
+     */
+    private const function checks(const string& $space, string& $out) : void
+    {
+        // every repository the namespace's models link to or load through, each once
+        array<string> $repos = [];
+        array<string> $written = [];
+        array<string> $stores = [];
+        foreach ($this->schema->models as const &$m) {
+            if ($m->space() != $space || $m->bare) {
+                continue;
+            }
+            Emitter::once($repos, $m->repository);
+            if (!$m->repositoryDeclared) {
+                $written[] = $m->repository;
+            }
+            $stores[] = "{$m->qualified}, {$m->key()->field()}, {$m->qualifiedHandle()}";
+            foreach ($m->relations as const &$r) {
+                Model $t = guard $this->schema->model($r->target);
+                Emitter::once($repos, $t->repository);
+            }
+        }
+        if ($stores->count() == 0) {
+            return;
+        }
+        $out->append("\n/**\n * The wiring of the models of this namespace, registered and checked in one go.\n */\n");
+        $out->append("public struct Carbon\n{\n");
+        $out->append("    /**\n     * Register the repositories carbongen wrote for these models; the ones the module declares\n");
+        $out->append("     * are registered by the app, with what they need.\n     */\n");
+        $out->append("    public static function register(carbon::Db $db) : status<carbon::Error>\n    {\n");
+        foreach ($written as const &$r) {
+            $out->append("        guard $db->register<{$r}>() else ($e) { return .error($e); }\n");
+        }
+        $out->append("        return .ok();\n    }\n\n");
+        $out->append("    /**\n     * Whether every repository these models need is registered on `$db`: their own, and the\n");
+        $out->append("     * ones their relations load through. Run it once after registering, so a repository left\n");
+        $out->append("     * out stops the app at startup, not on the first request that reaches it. It also makes\n");
+        $out->append("     * the store of every model, so none is made while requests run.\n     */\n");
+        $out->append("    public static function check(carbon::Db $db) : status<carbon::Error>\n    {\n");
+        foreach ($repos as const &$r) {
+            $out->append("        if (!$db->has<{$r}>()) {\n            return .error(.unregistered('{$r}'));\n        }\n");
+        }
+        foreach ($stores as const &$args) {
+            $out->append("        $db->store<{$args}>();\n");
+        }
+        $out->append("        return .ok();\n    }\n}\n");
+    }
+
+    /**
+     * Add `$name` to `$names` unless it is there already.
+     */
+    private static function once(array<string>& $names, const string& $name) : void
+    {
+        foreach ($names as const &$n) {
+            if ($n == $name) {
+                return;
+            }
+        }
+        $names[] = $name;
     }
 
     /**
@@ -168,7 +235,7 @@ public struct Emitter
         string $k = $key->field();
 
         $out->append("\n/**\n * The columns of `{$named}` and how `{$from}` maps onto them.\n */\n");
-        $out->append("public class {$handle} : hydrahon::Source, carbon::Schema<{$model}, {$k}, {$m->repository}>\n{\n");
+        $out->append("public class {$handle} : hydrahon::Source, carbon::Schema<{$model}, {$k}>\n{\n");
         $this->columns($m, $out);
         $out->append("\n");
 
@@ -227,7 +294,7 @@ public struct Emitter
         }
         $out->append("    }\n\n");
 
-        $out->append("    public const function link({$model}& $m) : carbon::Link<{$m->repository}>&\n    {\n");
+        $out->append("    public const function link({$model}& $m) : carbon::Link&\n    {\n");
         $out->append("        return $m->{$m->linkField};\n    }\n\n");
 
         $out->append("    public const function stamp({$model}& $m, carbon::Event $event, hydrahon::DateTime $now) : void\n    {\n");
@@ -266,6 +333,15 @@ public struct Emitter
             $out->append("        return null;\n");
         }
         $out->append('    }');
+        if ($m->version->size() > 0) {
+            Column $v = guard $m->column($m->version);
+            $out->append("\n\n    public const function version(const {$model}& $m) : int64?\n    {\n");
+            $out->append("        return $m->{$v->property} as int64;\n    }\n\n");
+            $out->append("    public const function versionIs(int64 $version) : hydrahon::Term<bool>?\n    {\n");
+            $out->append("        return {$handle}::${$v->property} == $version;\n    }\n\n");
+            $out->append("    public const function revise({$model}& $m, int64 $version) : void\n    {\n");
+            $out->append("        $m->{$v->property} = $version as {$v->inner};\n    }");
+        }
 
         $out->append("\n}\n");
         $this->aliasClass($m, $out);
@@ -277,6 +353,35 @@ public struct Emitter
             $this->relations($m, $out);
             $this->load($m, $out);
         }
+        $this->wiring($m, $out);
+    }
+
+    /**
+     * The interface every repository of `$m` names: its session, the model's store and, with
+     * relations, `load()`.
+     */
+    private const function wiring(const Model& $m, string& $out) : void
+    {
+        string $from = Names::local($m->qualified);
+        string $iface = $m->wiringInterface();
+        string $r = Names::local($m->repository);
+        string $store = "carbon::Store<{$m->qualified}, {$m->key()->field()}, {$m->qualifiedHandle()}>";
+        $out->append("\n/**\n * What a repository of `{$from}` models reaches through carbon: its session and the model's\n");
+        $out->append(" * store. A repository written by hand names it and keeps its session in `$session`:\n");
+        $out->append(" * `{$r} : carbon::Repository<{$from}, …>, {$iface}`.\n */\n");
+        $out->append("public interface {$iface}\n{\n");
+        $out->append("    /**\n     * The session the repository was built for.\n     */\n");
+        $out->append("    function session() : carbon::Session\n    {\n        return $this->session;\n    }\n\n");
+        $out->append("    /**\n     * The store of `{$from}` models, shared by every session.\n     */\n");
+        $out->append("    function store() : {$store}\n    {\n");
+        $out->append("        carbon::Session $s = $this->session();\n");
+        $out->append("        return $s->store<{$m->qualified}, {$m->key()->field()}, {$m->qualifiedHandle()}>();\n    }\n");
+        if ($m->relations->count() > 0) {
+            string $load = $m->loadStruct();
+            $out->append("\n    /**\n     * Start filling the relations of models already in hand.\n     */\n");
+            $out->append("    function load() : {$load}\n    {\n        return {$load}($this->session());\n    }\n");
+        }
+        $out->append("}\n");
     }
 
     /**
@@ -314,20 +419,19 @@ public struct Emitter
         string $from = Names::local($m->qualified);
         string $iface = $m->relationsInterface();
         string $load = $m->loadStruct();
-        string $loading = $m->loadingInterface();
-        string $r = Names::local($m->repository);
         $out->append("\n/**\n * The relations to fill on `{$from}` models already in hand:\n * `$repo->load()->with…()->into($models)`. It has no conditions or order; the models are\n * the ones given.\n */\n");
         $out->append("public struct {$load} : {$iface}<{$load}>\n{\n");
         $out->append("    internal carbon::Fill<{$m->qualified}> $fill;\n\n");
-        $out->append("    public constructor(carbon::Connection $db)\n    {\n        $this->fill = carbon::Fill<{$m->qualified}>($db);\n    }\n\n");
+        $out->append("    public constructor(carbon::Session $session)\n    {\n        $this->fill = carbon::Fill<{$m->qualified}>($session);\n    }\n\n");
         $out->append("    /**\n     * Fill `$relation` too: what the `with…()` methods call, and where a relation written by\n     * hand goes.\n     */\n");
         $out->append("    public function with(carbon::Eager<{$m->qualified}> $relation) : {$load}\n    {\n        {$load} $copy = $this;\n        $copy->fill->add($relation);\n        return $copy;\n    }\n\n");
         $out->append("    /**\n     * Fill every relation asked for on `$models`, one query each.\n     */\n");
-        $out->append("    public function into(array<{$m->qualified}>& $models) : status<carbon::Error>\n    {\n        return $this->fill->into($models);\n    }\n}\n");
-        $out->append("\n/**\n * `load()` for the repository of `{$from}` models. A repository written by hand names it:\n * `{$r} : carbon::Repository<{$from}, …>, {$loading}`.\n */\n");
-        $out->append("public interface {$loading}\n{\n");
-        $out->append("    /**\n     * Start filling the relations of models already in hand.\n     */\n");
-        $out->append("    function load() : {$load}\n    {\n        return {$load}($this->connection());\n    }\n}\n");
+        string $kf = $m->key()->field();
+        $out->append("    public function into(array<{$m->qualified}>& $models) : status<carbon::Error>\n    {\n");
+        $out->append("        // the models in hand are the load's first: relations back to them share them\n");
+        $out->append("        carbon::Loaded $seen = carbon::Loaded();\n");
+        $out->append("        foreach ($models as const &$m) {\n            $seen->add<{$kf}, {$m->qualified}>($m->{$m->key()->property}, $m);\n        }\n");
+        $out->append("        return $this->fill->into($models, $seen);\n    }\n}\n");
     }
 
     private const function read(const Model& $m, string& $out) : void
@@ -490,20 +594,14 @@ public struct Emitter
             }
             $out->append("public struct {$q} : carbon::Query<{$m->qualified}, {$q}>{$adopts}\n{\n");
             $out->append("    internal {$rows} $rows;\n\n");
-            $out->append("    public constructor(carbon::Connection $db)\n    {\n        $this->rows = {$rows}($db);\n    }\n\n");
+            $out->append("    public constructor(carbon::Session $session)\n    {\n        $this->rows = {$rows}($session);\n    }\n\n");
             $out->append("    public function rows() : {$rows}&\n    {\n        return $this->rows;\n    }\n}\n");
         }
         if (!$m->repositoryDeclared) {
             string $r = Names::local($m->repository);
-            $out->append("\n/**\n * The repository of `{$from}` models: writes and queries, nothing of its own. Declare a\n * class conforming to `carbon::Repository<{$from}, …>` in its place for finders and hooks.\n */\n");
-            if ($m->relations->count() == 0) {
-                $out->append("public type {$r} = carbon::Records<{$m->qualified}, {$m->query}, {$k}>;\n");
-            } else {
-                // a type alias cannot adopt the generated load(), so the repository is spelled out
-                $out->append("public class {$r} : carbon::Repository<{$m->qualified}, {$m->query}, {$k}>, {$m->loadingInterface()}\n{\n");
-                $out->append("    public carbon::Connection $db;\n\n");
-                $out->append("    public function query() : {$m->query}\n    {\n        return {$m->query}($this->db);\n    }\n}\n");
-            }
+            $out->append("\n/**\n * The repository of `{$from}` models: writes and queries, nothing of its own. Declare a\n * struct conforming to `carbon::Repository<{$from}, …>` in its place for finders and hooks.\n */\n");
+            $out->append("public struct {$r} : carbon::Repository<{$m->qualified}, {$m->query}, {$k}>, {$m->wiringInterface()}\n{\n");
+            $out->append("    public carbon::Session $session;\n}\n");
         }
     }
 
@@ -520,8 +618,9 @@ public struct Emitter
         string $from = Names::local($m->qualified);
         $out->append("\n/**\n * The `{$r->property}` of a batch of `{$from}` models, loaded with one query.\n */\n");
         $out->append("public class {$class} : carbon::Eager<{$m->qualified}>\n{\n");
-        $out->append("    internal carbon::relation::Fetch<{$t->qualified}, {$tq}> $fetch;\n\n");
-        $out->append("    public constructor()\n    {\n        $this->fetch = carbon::relation::Fetch<{$t->qualified}, {$tq}>();\n    }\n\n");
+        string $fetch = "carbon::relation::Fetch<{$t->qualified}, {$tq}, {$t->repository}>";
+        $out->append("    internal {$fetch} $fetch;\n\n");
+        $out->append("    public constructor()\n    {\n        $this->fetch = {$fetch}('{$t->repository}');\n    }\n\n");
         $out->append("    /**\n     * Start from `$base`, a query of the related model, for its conditions, order and scope.\n     */\n");
         $out->append("    public function from({$tq} $base) : {$class}\n    {\n        $this->fetch->from($base);\n        return $this;\n    }\n\n");
         $out->append("    public function where(hydrahon::Term<bool> $condition) : {$class}\n    {\n        $this->fetch->where($condition);\n        return $this;\n    }\n\n");
@@ -529,7 +628,7 @@ public struct Emitter
         $out->append("    public function constrain(function<{$tq}({$tq})> $constrain) : {$class}\n    {\n        $this->fetch->constrain($constrain);\n        return $this;\n    }\n\n");
         $out->append("    /**\n     * Load `$relation` for the related models too, with one more query.\n     */\n");
         $out->append("    public function with(carbon::Eager<{$t->qualified}> $relation) : {$class}\n    {\n        $this->fetch->with($relation);\n        return $this;\n    }\n\n");
-        $out->append("    public function load(array<{$m->qualified}>& $models, carbon::Connection $db) : status<carbon::Error>\n    {\n");
+        $out->append("    public function load(array<{$m->qualified}>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>\n    {\n");
         // the key each model of the batch is matched on: its own foreign key or its key
         string $kt = '';
         string $picks = '';
@@ -555,44 +654,93 @@ public struct Emitter
             $take = 'all';
         }
         bool $optional = $m->optional($r);
+        bool $belongs = $r->direction == Direction::belongsTo;
+        bool $one = $r->direction != Direction::hasMany;
+        string $tt = $t->qualified;
+        const Column& $pk = $t->key();
+        string $pkt = $pk->field();
+        string $seen = "$seen->find<{$kt}, {$tt}>";
+        if ($one) {
+            // only a relation nothing narrows may hand out a model the load read for another
+            $out->append("        bool $reuse = $this->fetch->plain();\n");
+        }
         $out->append("        carbon::relation::Keys<{$kt}> $keys = carbon::relation::Keys<{$kt}>();\n");
         $out->append("        foreach ($models as const &$m) {\n");
+        string $key = $own;
+        string $pad = '            ';
         if ($optional) {
             $out->append("            if ({$own} != null) {\n");
             $out->append("                {$kt} $k = guard {$own};\n");
-            $out->append("                $keys->add($k);\n");
-            $out->append("            }\n");
+            $key = '$k';
+            $pad = '                ';
+        }
+        if ($belongs) {
+            // a model this load holds already needs no row read again
+            // bound first: echoc never lets go of a model compared with null where it is returned
+            $out->append("{$pad}{$tt}? $held = null;\n");
+            $out->append("{$pad}if ($reuse) {\n{$pad}    $held = {$seen}({$key});\n{$pad}}\n");
+            $out->append("{$pad}if ($held == null) {\n{$pad}    $keys->add({$key});\n{$pad}}\n");
         } else {
-            $out->append("            $keys->add({$own});\n");
+            $out->append("{$pad}$keys->add({$key});\n");
+        }
+        if ($optional) {
+            $out->append("            }\n");
         }
         $out->append("        }\n");
-        $out->append("        array<{$t->qualified}> $found = [];\n");
+        $out->append("        array<{$tt}> $found = [];\n");
         $out->append("        if (!$keys->empty()) {\n");
-        $out->append("            {$tq} $q = $this->fetch->query($db, {$picks});\n");
-        $out->append("            array<{$t->qualified}> $rows = guard $q->get() else ($e) { return .error($e); }\n");
+        $out->append("            {$tq} $q = guard $this->fetch->query($session, {$picks}, $seen) else ($e) { return .error($e); }\n");
+        $out->append("            array<{$tt}> $rows = guard $q->get() else ($e) { return .error($e); }\n");
         $out->append("            $found = mv $rows;\n");
         $out->append("        }\n");
-        $out->append("        carbon::relation::Index<{$kt}, {$t->qualified}> $by = carbon::relation::Index<{$kt}, {$t->qualified}>();\n");
+        $out->append("        carbon::relation::Index<{$kt}, {$tt}> $by = carbon::relation::Index<{$kt}, {$tt}>();\n");
+        if ($one && !$belongs) {
+            $out->append("        carbon::relation::Index<{$kt}, {$tt}> $known = carbon::relation::Index<{$kt}, {$tt}>();\n");
+        }
         $out->append("        foreach ($found as const &$f) {\n");
+        $out->append("            {$tt}? $had = $seen->find<{$pkt}, {$tt}>($f->{$pk->property});\n");
+        string $at = $by;
+        $pad = '            ';
         if ($loose) {
             $out->append("            if ({$by} != null) {\n");
             $out->append("                {$kt} $k = guard {$by};\n");
-            $out->append("                $by->add($k, $f);\n");
-            $out->append("            }\n");
+            $at = '$k';
+            $pad = '                ';
+        }
+        string $keep = "{$pad}$by->add({$at}, $f);\n{$pad}if ($had == null) {\n{$pad}    $seen->add<{$pkt}, {$tt}>($f->{$pk->property}, $f);\n{$pad}}\n";
+        if ($one && !$belongs) {
+            $out->append("{$pad}if ($reuse && $had != null) {\n");
+            $out->append("{$pad}    {$tt} $h = guard $had;\n");
+            $out->append("{$pad}    $known->add({$at}, $h);\n");
+            $out->append("{$pad}} else {\n");
+            $out->append("{$pad}    $by->add({$at}, $f);\n{$pad}    if ($had == null) {\n{$pad}        $seen->add<{$pkt}, {$tt}>($f->{$pk->property}, $f);\n{$pad}    }\n");
+            $out->append("{$pad}}\n");
         } else {
-            $out->append("            $by->add({$by}, $f);\n");
+            $out->append($keep);
+        }
+        if ($loose) {
+            $out->append("            }\n");
         }
         $out->append("        }\n");
         $out->append("        foreach ($models as &$m) {\n");
-        if ($optional) {
-            $out->append("            {$t->qualified}? $one = null;\n");
-            $out->append("            if ({$own} != null) {\n");
-            $out->append("                {$kt} $k = guard {$own};\n");
-            $out->append("                $one = $by->first($k);\n");
-            $out->append("            }\n");
-            $out->append("            $m->{$r->property}->set($one);\n");
+        if (!$one) {
+            $out->append("            $m->{$r->property}->set($by->all({$own}));\n");
         } else {
-            $out->append("            $m->{$r->property}->set($by->{$take}({$own}));\n");
+            if ($optional) {
+                $out->append("            if ({$own} == null) {\n                $m->{$r->property}->set(null);\n                continue;\n            }\n");
+                $out->append("            {$kt} $k = guard {$own};\n");
+            } else {
+                $out->append("            {$kt} $k = {$own};\n");
+            }
+            $out->append("            {$tt}? $fresh = $by->first($k);\n");
+            $out->append("            if ($fresh != null) {\n                $m->{$r->property}->set($fresh);\n                continue;\n            }\n");
+            if ($belongs) {
+                $out->append("            {$tt}? $shared = null;\n");
+                $out->append("            if ($reuse) {\n                $shared = {$seen}($k);\n            }\n");
+            } else {
+                $out->append("            {$tt}? $shared = $known->first($k);\n");
+            }
+            $out->append("            if ($shared != null) {\n                {$tt} $s = guard $shared;\n                $m->{$r->property}->share($s);\n            } else {\n                $m->{$r->property}->set(null);\n            }\n");
         }
         $out->append("        }\n");
         $out->append("        return .ok();\n    }\n}\n");

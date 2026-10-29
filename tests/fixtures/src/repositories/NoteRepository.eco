@@ -1,8 +1,13 @@
 namespace fixtures;
 
-public class NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteLoading
+/**
+ * Notes, with hooks, a finder of its own and two things it is built with: the trail its hooks
+ * write to, and flags that narrow its queries. World's factory hands every repository it builds
+ * the same two, so a note saved through its link reaches the same trail.
+ */
+public struct NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteWiring
 {
-    public carbon::Connection $db;
+    public carbon::Session $session;
 
     /**
      * What the hooks heard, shared with observers so the order shows.
@@ -10,16 +15,17 @@ public class NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteLo
     public Trail $trail = Trail();
 
     /**
-     * Narrow every query this repository starts to pinned notes, relations included.
+     * How every query this repository starts is narrowed, relations included.
      */
-    public bool $pinnedOnly = false;
+    public NoteFlags $flags = NoteFlags();
 
     public function query() : NoteQuery
     {
-        if ($this->pinnedOnly) {
-            return NoteQuery($this->db)->pinned();
+        NoteQuery $q = NoteQuery($this->session);
+        if ($this->flags->pinnedOnly) {
+            return $q->pinned();
         }
-        return NoteQuery($this->db);
+        return $q;
     }
 
     /**
@@ -28,10 +34,16 @@ public class NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteLo
     public function before(carbon::Event $event, Note& $note) : status<carbon::Error>
     {
         $this->trail->heard[] = "repo before {$event->value()}";
+        // a session made for an editor says who wrote it
+        Editor? $editor = $this->session->get<Editor>();
+        if ($editor != null) {
+            Editor $e = guard $editor;
+            $this->trail->heard[] = "by {$e->name}";
+        }
         if ($event->saves()) {
             $note->title = str::trim($note->title);
             if ($note->title->empty()) {
-                return .error(.refused('a note needs a title'));
+                return .error(.refused(carbon::Refusal('a note needs a title')));
             }
         }
         return .ok();
@@ -49,4 +61,15 @@ public class NoteRepository : carbon::Repository<Note, NoteQuery, int64>, NoteLo
     {
         return $this->find()->pinned()->feeling(.happy)->newest()->get();
     }
+}
+
+/**
+ * Switches a note repository is built with, shared by every one its factory builds.
+ */
+public class NoteFlags
+{
+    /**
+     * Narrow every query to pinned notes.
+     */
+    public bool $pinnedOnly = false;
 }

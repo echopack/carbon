@@ -1,0 +1,187 @@
+/*
+ * A model never claims more than its row: a write by key that finds no row is stale, a
+ * rollback takes back what the transaction wrote into the models, and a version column keeps
+ * two copies of one row from writing over each other.
+ */
+
+use carbon::Error;
+use hydrahon::{Value, DateTime};
+use fixtures::{World, Note, Draft, DraftTable, noteRow, message};
+
+internal const string STALE = 'the row is gone or changed since the model was loaded';
+
+internal function draftRow(int64 $id, const string& $text, int32 $revision) : array<Value>
+{
+    return DraftTable()->row(Draft($id: $id, $text: $text, $revision: $revision));
+}
+
+test an_update_that_finds_no_row_is_stale
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Before')])->written(0);
+    Note $n = guard $w->notes->find()->one(3);
+    $n->title = 'After';
+    status<Error> $s = $n->save();
+    assert(message($s) == STALE);
+    // the change was not written, so it is still a change
+    assert($n->dirty());
+}
+
+test a_purge_that_finds_no_row_is_stale_and_keeps_the_model
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Gone')])->written(0);
+    Note $n = guard $w->notes->find()->one(3);
+    status<Error> $s = $n->purge();
+    assert(message($s) == STALE);
+    assert($n->persisted());
+}
+
+test a_soft_delete_that_finds_no_row_puts_the_timestamp_back
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Gone')])->written(0);
+    Note $n = guard $w->notes->find()->one(3);
+    status<Error> $s = $n->delete();
+    assert(message($s) == STALE);
+    assert($n->deletedAt == null);
+}
+
+test a_driver_that_counts_changed_rows_is_not_second_guessed
+{
+    $w = World();
+    $w->fake->matched = false;
+    $w->fake->rows([noteRow(3, 'Before')])->written(0);
+    Note $n = guard $w->notes->find()->one(3);
+    $n->title = 'After';
+    guard $n->save();
+    assert(!$n->dirty());
+}
+
+test a_rolled_back_insert_leaves_the_model_new
+{
+    $w = World();
+    $w->fake->written($insertId: 7)->fails(fixtures::failure(.duplicate))->written($insertId: 9);
+    Note $carol = Note($title: 'Carol');
+    $w->notes->attach($carol);
+    status<Error> $s = $w->db->session()->transaction(function[$w, $carol]() : status<Error> {
+        guard $carol->save() else ($e) { return .error($e); }
+        guard $w->notes->create(Note($title: 'Again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failure()->duplicate());
+    assert($w->fake->texts()[3] == 'ROLLBACK');
+    assert(!$carol->persisted());
+    assert($carol->id == 0);
+    // still linked, so saving it again inserts it again
+    guard $carol->save();
+    assert($carol->id == 9);
+    assert($w->fake->last()->starts('INSERT INTO `notes`'));
+}
+
+test a_rolled_back_update_leaves_the_change_to_write_again
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Before')])->written(1)->written(1);
+    Note $n = guard $w->notes->find()->one(3);
+    status<Error> $s = $w->db->session()->transaction(function[$n]() : status<Error> {
+        $n->title = 'After';
+        guard $n->save() else ($e) { return .error($e); }
+        return .error(.refused(carbon::Refusal('changed my mind')));
+    });
+    assert(message($s) == 'refused: changed my mind');
+    assert($n->title == 'After');
+    assert($n->dirty());
+    guard $n->save();
+    assert($w->fake->last() == 'UPDATE `notes` SET `title` = ?, `updated_at` = ? WHERE `notes`.`id` = ?');
+}
+
+test a_rolled_back_delete_brings_the_model_back
+{
+    $w = World();
+    $w->fake->rows([noteRow(3, 'Kept'), noteRow(4, 'Also kept')])->written(1)->written(1);
+    array<Note> $found = guard $w->notes->all();
+    Note $soft = $found[0];
+    Note $hard = $found[1];
+    status<Error> $s = $w->db->session()->transaction(function[$soft, $hard]() : status<Error> {
+        guard $soft->delete() else ($e) { return .error($e); }
+        guard $hard->purge() else ($e) { return .error($e); }
+        return .error(.refused(carbon::Refusal('no')));
+    });
+    assert($s->failed());
+    assert($soft->deletedAt == null);
+    assert($soft->persisted() && $hard->persisted());
+    // the updated stamp the delete set stays; the next save writes a fresh one
+    assert($soft->updatedAt != null && $soft->dirty());
+}
+
+test a_committed_transaction_is_forgotten
+{
+    $w = World();
+    $w->fake->written($insertId: 7);
+    Note $kept = Note($title: 'Kept');
+    $w->notes->attach($kept);
+    guard $w->db->session()->transaction(function[$kept]() : status<Error> {
+        return $kept->save();
+    });
+    status<Error> $later = $w->db->session()->transaction(function() : status<Error> {
+        return .error(.refused(carbon::Refusal('nothing to do')));
+    });
+    assert($later->failed());
+    assert($kept->persisted() && $kept->id == 7);
+}
+
+test a_version_guards_and_advances_every_update
+{
+    $w = World();
+    $w->fake->rows([draftRow(1, 'first', 3)])->written(1);
+    Draft $d = guard $w->drafts->find()->one(1);
+    $d->text = 'second';
+    guard $d->save();
+    assert($d->revision == 4);
+    assert($w->fake->last() == 'UPDATE `drafts` SET `text` = ?, `revision` = ? WHERE `drafts`.`id` = ? AND `drafts`.`revision` = ?');
+    assert($w->fake->sent(1, [Value::from('second'), Value::from(4), Value::from(1), Value::from(3)]));
+    assert(!$d->dirty());
+}
+
+test a_version_that_moved_on_is_stale
+{
+    $w = World();
+    $w->fake->rows([draftRow(1, 'first', 3)])->written(0);
+    Draft $d = guard $w->drafts->find()->one(1);
+    $d->text = 'mine';
+    status<Error> $s = $d->save();
+    assert(message($s) == STALE);
+    assert($d->revision == 3);
+    assert($d->dirty());
+}
+
+test deletes_are_guarded_by_the_version_too
+{
+    $w = World();
+    $w->fake->rows([draftRow(1, 'soft', 3), draftRow(2, 'hard', 5)])->written(1)->written(1);
+    array<Draft> $found = guard $w->drafts->all();
+    Draft $soft = $found[0];
+    Draft $hard = $found[1];
+    guard $soft->delete();
+    assert($soft->revision == 4);
+    assert($w->fake->last() == 'UPDATE `drafts` SET `revision` = ?, `deleted_at` = ? WHERE `drafts`.`id` = ? AND `drafts`.`revision` = ?');
+    guard $hard->purge();
+    assert($w->fake->last() == 'DELETE FROM `drafts` WHERE `drafts`.`id` = ? AND `drafts`.`revision` = ?');
+    assert($w->fake->sent(2, [Value::from(2), Value::from(5)]));
+}
+
+test a_rollback_puts_the_version_back
+{
+    $w = World();
+    $w->fake->rows([draftRow(1, 'first', 3)])->written(1);
+    Draft $d = guard $w->drafts->find()->one(1);
+    status<Error> $s = $w->db->session()->transaction(function[$d]() : status<Error> {
+        $d->text = 'second';
+        guard $d->save() else ($e) { return .error($e); }
+        return .error(.refused(carbon::Refusal('no')));
+    });
+    assert($s->failed());
+    assert($d->revision == 3);
+    assert($d->dirty());
+}

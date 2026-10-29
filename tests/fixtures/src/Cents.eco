@@ -5,6 +5,11 @@ namespace fixtures;
  */
 public struct Cents : carbon::Codec<Money, int64>
 {
+    /**
+     * How many times any `Cents` encoded, so a test can count what a write costs.
+     */
+    public static int64 $encodes = 0;
+
     public const function decode(int64 $raw) : result<Money, carbon::Problem>
     {
         if ($raw < 0) {
@@ -15,6 +20,7 @@ public struct Cents : carbon::Codec<Money, int64>
 
     public const function encode(const Money& $value) : int64
     {
+        Cents::$encodes = Cents::$encodes + 1;
         return $value->cents;
     }
 }

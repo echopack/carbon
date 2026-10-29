@@ -51,7 +51,9 @@ public struct Json
      */
     public static function has(const json::Value& $v, const string& $name) : bool
     {
-        return Json::find($v, $name) != null;
+        // bound first: echoc never lets go of a value compared with null where it is returned
+        json::Value? $found = Json::find($v, $name);
+        return $found != null;
     }
 
     /**

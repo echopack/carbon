@@ -1,13 +1,8 @@
 namespace blog;
 
-public class UserRepository : carbon::Repository<User, UserQuery, int64>, UserLoading
+public struct UserRepository : carbon::Repository<User, UserQuery, int64>, UserWiring
 {
-    public carbon::Connection $db;
-
-    public function query() : UserQuery
-    {
-        return UserQuery($this->db);
-    }
+    public carbon::Session $session;
 
     /**
      * The user with this email, null when there is none.

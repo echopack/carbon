@@ -1,0 +1,121 @@
+namespace carbon;
+
+/**
+ * Where work on a `Db` happens: repositories are built for a session, queries run on it, models
+ * link to it and transactions are opened on it. A `Db` has a root session for as long as it
+ * lives, `$db->session()`; a request makes its own with what it is about, `$db->scoped(...)`.
+ *
+ * ```echo
+ * Session $s = $db->scoped(Editor($user));
+ * PostRepository $posts = guard $s->repo<PostRepository>();
+ * array<Post> $feed = guard $posts->find()->published()->newest()->get();
+ * ```
+ *
+ * What a session carries is its context: values of class types the app defines, one per type,
+ * that hooks and observers read with `get<Editor>()`. Context never holds a session or a
+ * repository: a session keeps its context alive, and nothing would ever free the two.
+ *
+ * Models keep only a weak link to their session: once it is gone, `$post->save()` answers
+ * `.detached` and `$s2->repo<PostRepository>()->attach($post)` moves it to another.
+ */
+public class Session
+{
+    internal Registry $registry;
+    internal Connection $connection;
+    internal map<type_id, erased> $context = [];
+
+    internal constructor(Registry $registry, Connection $connection)
+    {
+        $this->registry = $registry;
+        $this->connection = $connection;
+    }
+
+    /**
+     * Keep `$value` as this session's `T`, in place of one it had.
+     */
+    public function put<T : class>(T $value) : void
+    {
+        $this->context[type_id<T>()] = erased::from($value);
+    }
+
+    /**
+     * This session's `T`, null when it has none: `$this->session->get<Editor>()` in a hook.
+     */
+    public const function get<T : class>() : T?
+    {
+        type_id $id = type_id<T>();
+        if (!$this->context->has($id)) {
+            return null;
+        }
+        erased $held = $this->context->get($id);
+        T $value;
+        // sound: only put writes the key, always with this type
+        unsafe {
+            $value = assume<T>($held);
+        }
+        return $value;
+    }
+
+    /**
+     * The repository of type `R`, built for this session: `.unregistered` when the `Db` has
+     * none. Building one is cheap; ask for it where it is needed.
+     */
+    public function repo<R>() : result<R, Error>
+    {
+        R $repo = guard $this->registry->build<R>($this) else {
+            return .error(.unregistered('the repository asked for'));
+        };
+        return .ok($repo);
+    }
+
+    /**
+     * Whether the `Db` has a repository of type `R`.
+     */
+    public const function has<R>() : bool
+    {
+        return $this->registry->has(type_id<R>());
+    }
+
+    /**
+     * The store of model `M`, shared by every session of the `Db`: what the generated
+     * `PostWiring::store()` reaches.
+     */
+    public function store<M, K, S>() : Store<M, K, S>
+    {
+        return $this->registry->store<M, K, S>();
+    }
+
+    /**
+     * The connection this session runs on.
+     */
+    public function connection() : Connection
+    {
+        return $this->connection;
+    }
+
+    /**
+     * Run `$work` in a transaction: commit when it succeeds, roll back when it fails and hand
+     * back its error. Transactions do not nest.
+     */
+    public function transaction(function<status<Error>()> $work) : status<Error>
+    {
+        return $this->connection->transaction($work);
+    }
+
+    /**
+     * Run `$work` in a transaction and hand back what it made: committed when it succeeds,
+     * rolled back when it fails.
+     */
+    public function transaction<T>(function<result<T, Error>()> $work) : result<T, Error>
+    {
+        return $this->connection->produce<T>($work);
+    }
+
+    /**
+     * Whether a transaction is open.
+     */
+    public const function inTransaction() : bool
+    {
+        return $this->connection->inTransaction();
+    }
+}

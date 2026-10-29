@@ -22,7 +22,7 @@ public enum Error
     case missing;
 
     /**
-     * The model is not linked to a repository, or the repository is gone.
+     * The model is not linked to a session, or its session is gone; `attach` links it to one.
      */
     case detached;
 
@@ -32,9 +32,9 @@ public enum Error
     case column(string $name, Problem $problem);
 
     /**
-     * A repository hook or an observer refused the write, with its reason.
+     * A repository hook or an observer refused the write, with why.
      */
-    case refused(string $reason);
+    case refused(Refusal $why);
 
     /**
      * A transaction was started inside another one.
@@ -57,6 +57,24 @@ public enum Error
      * `create` was handed a model whose row already exists; `save` writes its changes.
      */
     case persisted;
+
+    /**
+     * A write by key touched no row: the row is gone, or its version moved on since the model
+     * was loaded. Load it again to see what is there now.
+     */
+    case stale;
+
+    /**
+     * What the app asked for or a relation needs is not registered on the `Db`: `$what` names
+     * it. A repository left out is a wiring mistake; the generated `Carbon::check($db)` finds
+     * every one of them at startup.
+     */
+    case unregistered(string $what);
+
+    /**
+     * `$what` is registered on the `Db` already; each type is registered once.
+     */
+    case registered(string $what);
 
     /**
      * Whether a unique key refused the write.
@@ -109,14 +127,14 @@ public function from(const carbon::Error& $e) : string
             return 'no matching row';
         },
         carbon::Error::detached => {
-            return 'the model is not linked to a live repository';
+            return 'the model is not linked to a live session';
         },
         carbon::Error::column($name, $problem) => {
             $why = str::from($problem);
             return "column {$name} {$why}";
         },
-        carbon::Error::refused($reason) => {
-            return "refused: {$reason}";
+        carbon::Error::refused($why) => {
+            return "refused: {$why->message}";
         },
         carbon::Error::nested => {
             return 'a transaction is already open';
@@ -129,6 +147,15 @@ public function from(const carbon::Error& $e) : string
         },
         carbon::Error::persisted => {
             return 'the model is already stored; save it instead';
+        },
+        carbon::Error::stale => {
+            return 'the row is gone or changed since the model was loaded';
+        },
+        carbon::Error::unregistered($what) => {
+            return "{$what} is not registered on the Db";
+        },
+        carbon::Error::registered($what) => {
+            return "{$what} is registered on the Db already";
         },
     };
     return '';

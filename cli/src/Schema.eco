@@ -124,7 +124,7 @@ public class Schema
         string $keyWhat = '';
         string $idAt = '';
         string $idWhat = '';
-        array<string> $tools = ['key', 'name', 'skip', 'created', 'updated', 'deleted', 'codec', 'computed', 'belongsTo', 'hasOne', 'hasMany'];
+        array<string> $tools = ['key', 'name', 'skip', 'created', 'updated', 'deleted', 'version', 'codec', 'computed', 'belongsTo', 'hasOne', 'hasMany'];
         array<string> $relating = ['belongsTo', 'hasOne', 'hasMany'];
         foreach (Json::items($d, 'fields') as const &$f) {
             string $field = Json::text($f, 'name');
@@ -140,17 +140,12 @@ public class Schema
             bool $fixed = Json::flag($type, 'const');
             bool $hidden = Json::text($f, 'visibility') == 'private';
 
-            string $repo = Types::argument($type, 'carbon::Link');
-            if ($repo->size() == 0 && Json::text($type, 'kind') == 'named' && Json::text($type, 'name') == 'unknown' && Json::text($f, 'default_value') == '.detached()') {
-                // a link to the repository carbongen writes, which echoc cannot name yet
-                $repo = $model->qualify($model->repositoryAlias());
-            }
-            if ($repo->size() > 0) {
+            if (Json::text($type, 'kind') == 'named' && Json::text($type, 'name') == 'carbon::Link') {
                 if ($model->linkField->size() > 0) {
                     $this->problem("{$fat}: {$what}: a model has one carbon::Link");
                 }
                 $model->linkField = $field;
-                $model->repository = $repo;
+                $model->repository = $this->repository($d, $model);
                 $this->idle($f, $tools, [], 'on the carbon::Link field', $fat, $what);
                 if ($fixed || $hidden) {
                     $this->problem("{$fat}: {$what}: the link cannot be const or private, carbon keeps the state of the model in it");
@@ -181,8 +176,8 @@ public class Schema
             }
             $c->fixed = $fixed;
             if (Json::has($f, 'computed')) {
-                if (Json::has($f, 'key') || Json::has($f, 'created') || Json::has($f, 'updated') || Json::has($f, 'deleted') || $c->shape == Shape::codec) {
-                    $this->problem("{$fat}: {$what}: a computed field is only read: no key, timestamp or codec");
+                if (Json::has($f, 'key') || Json::has($f, 'created') || Json::has($f, 'updated') || Json::has($f, 'deleted') || Json::has($f, 'version') || $c->shape == Shape::codec) {
+                    $this->problem("{$fat}: {$what}: a computed field is only read: no key, timestamp, version or codec");
                     continue;
                 }
                 if ($fixed) {
@@ -219,7 +214,7 @@ public class Schema
         }
 
         if ($model->linkField->size() == 0) {
-            $this->problem("{$at}: {$q}: a model needs a carbon::Link<Repository> field: public carbon::Link<PostRepository> $link = .detached();");
+            $this->problem("{$at}: {$q}: a model needs a carbon::Link field: public carbon::Link $link = .detached();");
         }
         if ($keys == 0) {
             // a column named id is the key when nothing is marked
@@ -249,14 +244,13 @@ public class Schema
         }
         $this->query($model);
         $model->repositoryDeclared = $this->declared->has($model->repository);
-        array<string> $generated = [$model->qualifiedHandle(), $model->qualify($model->aliasClass()), $model->qualify($model->rowsAlias())];
+        array<string> $generated = [$model->qualifiedHandle(), $model->qualify($model->aliasClass()), $model->qualify($model->rowsAlias()), $model->qualify($model->wiringInterface()), $model->qualify('Carbon')];
         if (!$model->queryDeclared) {
             $generated[] = $model->query;
         }
         if ($model->relations->count() > 0) {
             $generated[] = $model->qualify($model->relationsInterface());
             $generated[] = $model->qualify($model->loadStruct());
-            $generated[] = $model->qualify($model->loadingInterface());
         }
         if (!$model->repositoryDeclared && $model->repository->size() > 0) {
             if (Names::space($model->repository) != $model->space()) {
@@ -314,6 +308,25 @@ public class Schema
         if (!$model->queryDeclared) {
             $model->query = $model->qualify($model->queryStruct());
         }
+    }
+
+    /**
+     * The repository of model `$model`: `R` of its `carbon::Model<M, R>`, or the one carbongen
+     * writes, `PostRepository`. echoc drops a conformance it cannot name yet, so a model whose
+     * repository carbongen still has to write shows none.
+     */
+    private const function repository(const json::Value& $d, const Model& $model) : string
+    {
+        foreach (Json::items($d, 'conforms') as const &$c) {
+            if (Json::text($c, 'name') != 'carbon::Model') {
+                continue;
+            }
+            array<json::Value> $args = Json::items($c, 'args');
+            if ($args->count() == 2 && Types::render($args[0]) == $model->qualified) {
+                return Types::render($args[1]);
+            }
+        }
+        return $model->qualify($model->repositoryAlias());
     }
 
     /**
@@ -626,6 +639,21 @@ public class Schema
                 $this->problem("{$at}: {$what}: one #[carbon::deleted] per model");
             }
             $model->deleted = $c->property;
+        }
+        if (Json::has($f, 'version')) {
+            bool $counter = !$c->nullable && $c->base == 'int64' && ($c->inner == 'int64' || $c->inner == 'int32')
+                && ($c->shape == Shape::plain || $c->shape == Shape::narrow);
+            if (!$counter) {
+                $this->problem("{$at}: {$what}: #[carbon::version] goes on an int32 or int64 field");
+            }
+            $this->settable('version', $c, $at, $what);
+            if (Json::has($f, 'key') || Json::has($f, 'created') || Json::has($f, 'updated') || Json::has($f, 'deleted')) {
+                $this->problem("{$at}: {$what}: #[carbon::version] is a counter of its own, not a key or a timestamp");
+            }
+            if ($model->version->size() > 0) {
+                $this->problem("{$at}: {$what}: one #[carbon::version] per model");
+            }
+            $model->version = $c->property;
         }
     }
 

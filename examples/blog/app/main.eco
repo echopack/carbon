@@ -10,7 +10,7 @@
  */
 
 use blog::{Tables, User, Post, CommentQuery, UserRepository, PostRepository, CommentRepository};
-use carbon::{Db, Error};
+use carbon::{Db, Session, Error};
 use carbon::mysql::Driver;
 use carbon::listen::Log;
 use std::env;
@@ -39,13 +39,17 @@ io::println('tables created');
 Log $log = Log();
 $db->listen($log);
 
-// register the repositories once; from here on they are reached by type
-$db->register(UserRepository($db->connection()));
-$db->register(PostRepository($db->connection()));
-$db->register(CommentRepository($db->connection()));
-UserRepository $users = $db->repo<UserRepository>();
-PostRepository $posts = $db->repo<PostRepository>();
-CommentRepository $comments = $db->repo<CommentRepository>();
+// register the repositories once, by type; every session builds its own
+guard $db->register<UserRepository>();
+guard $db->register<PostRepository>();
+guard $db->register<CommentRepository>();
+// every repository the models need is there, or the app stops here and names the missing one
+guard blog::Carbon::check($db) else ($e) { die("wiring: {$e}"); }
+// a script has one session: the Db's own
+Session $session = $db->session();
+UserRepository $users = guard $session->repo<UserRepository>();
+PostRepository $posts = guard $session->repo<PostRepository>();
+CommentRepository $comments = guard $session->repo<CommentRepository>();
 
 // create
 User $mario = guard $users->create(User($email: 'mario@example.com', $name: 'Mario', $admin: true));
@@ -106,7 +110,7 @@ uint64 $archived = guard $posts->archive($mario);
 io::println("archive    {$archived} of Mario's posts in one statement");
 
 // the second insert hits the unique email, so Carol goes too
-status<Error> $s = $db->transaction(function[$users]() : status<Error> {
+status<Error> $s = $db->session()->transaction(function[$users]() : status<Error> {
     guard $users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
     guard $users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
     return .ok();

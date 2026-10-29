@@ -1,17 +1,17 @@
 namespace carbon;
 
 /**
- * The relations to fill on models `M` already in hand, and the connection they load on: what
- * the generated `PostLoad` keeps behind its `with…()` methods and `into()`.
+ * The relations to fill on models `M` already in hand, and the session they load in: what the
+ * generated `PostLoad` keeps behind its `with…()` methods and `into()`.
  */
 public struct Fill<M>
 {
-    internal Connection $db;
+    internal Session $session;
     internal array<Eager<M>> $eager = [];
 
-    public constructor(Connection $db)
+    public constructor(Session $session)
     {
-        $this->db = $db;
+        $this->session = $session;
     }
 
     /**
@@ -23,12 +23,13 @@ public struct Fill<M>
     }
 
     /**
-     * Fill every relation on `$models`, one query each, in the order they were added.
+     * Fill every relation on `$models`, one query each, in the order they were added. `$seen`
+     * holds `$models` already, so relations back to them reuse them.
      */
-    public function into(array<M>& $models) : status<Error>
+    public function into(array<M>& $models, Loaded $seen) : status<Error>
     {
         foreach ($this->eager as &$relation) {
-            guard $relation->load($models, $this->db) else ($e) { return .error($e); }
+            guard $relation->load($models, $this->session, $seen) else ($e) { return .error($e); }
         }
         return .ok();
     }

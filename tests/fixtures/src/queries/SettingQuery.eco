@@ -3,15 +3,15 @@ namespace fixtures;
 /**
  * The query state's name, written the way carbongen writes one for a generated model.
  */
-public type SettingRows = carbon::Rows<Setting, string, SettingTable, SettingRepository>;
+public type SettingRows = carbon::Rows<Setting, string, SettingTable>;
 
 public struct SettingQuery : carbon::Query<Setting, SettingQuery>
 {
     internal SettingRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = SettingRows($db);
+        $this->rows = SettingRows($session);
     }
 
     public function rows() : SettingRows&

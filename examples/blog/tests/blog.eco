@@ -23,12 +23,16 @@ class Rig
         $this->log = Log();
         $this->db = Db($this->fake, clock: clock::Fixed(unix: 1700000000));
         $this->db->listen($this->log);
-        $this->db->register(UserRepository($this->db->connection()));
-        $this->db->register(PostRepository($this->db->connection()));
-        $this->db->register(CommentRepository($this->db->connection()));
-        $this->users = $this->db->repo<UserRepository>();
-        $this->posts = $this->db->repo<PostRepository>();
-        $this->comments = $this->db->repo<CommentRepository>();
+        guard $this->db->register<UserRepository>();
+        guard $this->db->register<PostRepository>();
+        guard $this->db->register<CommentRepository>();
+        guard blog::Carbon::check($this->db);
+        UserRepository $users = guard $this->db->session()->repo<UserRepository>();
+        $this->users = $users;
+        PostRepository $posts = guard $this->db->session()->repo<PostRepository>();
+        $this->posts = $posts;
+        CommentRepository $comments = guard $this->db->session()->repo<CommentRepository>();
+        $this->comments = $comments;
     }
 }
 
@@ -194,6 +198,28 @@ test nested_relations_cost_one_query_per_level
     assert($mine[1]->comments->get()[0]->body == 'nice');
 }
 
+test a_comment_points_at_the_post_it_was_loaded_for
+{
+    $r = Rig();
+    $r->fake->rows([postRow(1, 7, 'a', .published), postRow(2, 7, 'b', .published)]);
+    $r->fake->rows([userRow(7, 'mario')]);
+    $r->fake->rows([CommentTable()->row(Comment($id: 100, $postId: 2, $body: 'nice'))]);
+    array<Post> $loaded = guard $r->posts->find()
+        ->withAuthor()
+        ->withComments(function(CommentQuery $q) : CommentQuery {
+            return $q->oldest()->withPost();
+        })
+        ->published()
+        ->get();
+    // posts, their authors, their comments: the comments' posts are the posts already in hand
+    assert($r->log->count() == 3);
+    Comment $c = $loaded[1]->comments->get()[0];
+    assert($c->post->shares());
+    Post $back = guard $c->post->get();
+    $back->views = 99;
+    assert($loaded[1]->views == 99);
+}
+
 test callbacks_shape_each_level
 {
     $r = Rig();
@@ -226,9 +252,10 @@ test a_transaction_rolls_back_on_a_duplicate
     $r = Rig();
     $r->fake->written($insertId: 1)->fails(.driver(carbon::Failure(.duplicate, 'Duplicate entry', '23000', 1062)));
     Db $db = $r->db;
-    status<Error> $s = $db->transaction(function[$db]() : status<Error> {
-        User $u = guard $db->repo<UserRepository>()->create(User($email: 'a@x.ch', $name: 'A')) else ($e) { return .error($e); }
-        guard $db->repo<UserRepository>()->create(User($email: 'a@x.ch', $name: 'Again')) else ($e) { return .error($e); }
+    status<Error> $s = $db->session()->transaction(function[$db]() : status<Error> {
+        UserRepository $users = guard $db->session()->repo<UserRepository>() else ($e) { return .error($e); }
+        User $u = guard $users->create(User($email: 'a@x.ch', $name: 'A')) else ($e) { return .error($e); }
+        guard $users->create(User($email: 'a@x.ch', $name: 'Again')) else ($e) { return .error($e); }
         return .ok();
     });
     assert($s->failed());

@@ -3,7 +3,7 @@ namespace blog;
 #[carbon::model: 'posts']
 public class Post : carbon::Model<Post, PostRepository>
 {
-    public carbon::Link<PostRepository> $link = .detached();
+    public carbon::Link $link = .detached();
 
     #[carbon::key]
     public int64 $id = 0;
@@ -34,7 +34,7 @@ public class Post : carbon::Model<Post, PostRepository>
     #[carbon::hasMany: 'postId']
     public carbon::Many<Comment> $comments = .unloaded();
 
-    public function link() : carbon::Link<PostRepository>&
+    public function link() : carbon::Link&
     {
         return $this->link;
     }

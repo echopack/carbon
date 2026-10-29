@@ -6,13 +6,13 @@ use carbon::select::Selected;
 
 /**
  * How one model maps onto its table: the contract between a `Store` and a model type `M` with
- * key `K`, kept by repository `R`. carbongen writes it from `#[carbon::*]` attributes; it can
- * just as well be written by hand.
+ * key `K`. carbongen writes it from `#[carbon::*]` attributes; it can just as well be written by
+ * hand.
  *
  * Columns have fixed positions, the order of `fields()`. `read`, `snapshot` and `write` all
  * use them.
  */
-public interface Schema<M, K, R>
+public interface Schema<M, K>
 {
     const function table() : hydrahon::Table;
 
@@ -106,7 +106,7 @@ public interface Schema<M, K, R>
     /**
      * Where the model keeps its link.
      */
-    const function link(M& $model) : Link<R>&;
+    const function link(M& $model) : Link&;
 
     /**
      * Set the created and updated timestamps for `$event`, if the model has them.
@@ -128,4 +128,29 @@ public interface Schema<M, K, R>
      * The condition that hides soft deleted rows, or null when the model has none.
      */
     const function live() : hydrahon::Term<bool>?;
+
+    /**
+     * The model's version, null when it has no `#[carbon::version]` column. An update or delete
+     * only touches the row while it still holds this version, and an update writes the next
+     * one, so a write from a model that is behind the row comes back `.stale`.
+     */
+    const function version(const M& $model) : int64?
+    {
+        return null;
+    }
+
+    /**
+     * The condition that the row holds version `$version`, null when the model has none.
+     */
+    const function versionIs(int64 $version) : hydrahon::Term<bool>?
+    {
+        return null;
+    }
+
+    /**
+     * Set the model's version. Only called when `version` answers one.
+     */
+    const function revise(M& $model, int64 $version) : void
+    {
+    }
 }

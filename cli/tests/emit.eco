@@ -39,14 +39,15 @@ test a_schema_names_the_database_everywhere
 test a_uint64_key
 {
     string $out = emitted(wide());
-    assert($out->contains('public class NoteTable : hydrahon::Source, carbon::Schema<app::Note, uint64, app::NoteRepository>'));
+    assert($out->contains('public class NoteTable : hydrahon::Source, carbon::Schema<app::Note, uint64>'));
     assert($out->contains('    public const function keyIs(uint64 $key) : hydrahon::Term<bool>'));
     assert($out->contains('    public const function keyIn(const array<uint64>& $keys) : hydrahon::Term<bool>'));
     assert($out->contains("        uint64 $c0 = guard $row->uint(0) else \{ return .error(.column('id', carbon::Problem::of($row, 0))); }"));
     // the driver hands back an int64 insert id
     assert($out->contains("    public const function inserted(app::Note& $m, int64 $key) : void\n    \{\n        $m->id = $key as uint64;\n    }"));
-    assert($out->contains('public type NoteRows = carbon::Rows<app::Note, uint64, app::NoteTable, app::NoteRepository>;'));
-    assert($out->contains('public type NoteRepository = carbon::Records<app::Note, app::NoteQuery, uint64>;'));
+    assert($out->contains('public type NoteRows = carbon::Rows<app::Note, uint64, app::NoteTable>;'));
+    assert($out->contains("public struct NoteRepository : carbon::Repository<app::Note, app::NoteQuery, uint64>, NoteWiring\n\{"));
+    assert($out->contains("    function store() : carbon::Store<app::Note, uint64, app::NoteTable>"));
 }
 
 test enums_of_every_integer_backing
@@ -125,11 +126,11 @@ internal function spread() : string
 test models_outside_a_namespace_come_first
 {
     string $out = emitted(spread());
-    usize $global = $out->find('public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string, SettingRepository>');
+    usize $global = $out->find('public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string>');
     usize $app = $out->find("\nnamespace app;\n");
     usize $other = $out->find("\nnamespace other;\n");
     assert($global < $app && $app < $other && $other < $out->size());
-    assert($out->contains('public type SettingRepository = carbon::Records<Setting, SettingQuery, string>;'));
+    assert($out->contains("public struct SettingRepository : carbon::Repository<Setting, SettingQuery, string>, SettingWiring\n\{\n    public carbon::Session $session;\n}"));
     assert($out->contains("    public const function inserted(Setting& $m, int64 $key) : void\n    \{\n    }"));
 }
 
@@ -140,7 +141,7 @@ test exact_names_and_string_keys
     // the notes keep snake case
     assert($out->contains("    public static hydrahon::Term<string> $commentId = carbon::select::column<string>('notes', 'comment_id');"));
     // an unmarked string id is a key the app assigns
-    assert($out->contains("public class CommentTable : hydrahon::Source, carbon::Schema<app::Comment, string, app::CommentRepository>"));
+    assert($out->contains("public class CommentTable : hydrahon::Source, carbon::Schema<app::Comment, string>"));
     assert($out->contains("    public const function generated() : bool\n    \{\n        return false;\n    }\n\n    public const function keyOf(const app::Comment& $m) : string"));
 }
 
@@ -150,14 +151,14 @@ test relations_across_namespaces_and_string_keys
     // a nullable string key to a model outside any namespace
     assert($out->contains('        carbon::relation::Keys<string> $keys = carbon::relation::Keys<string>();'));
     assert($out->contains('        carbon::relation::Index<string, Setting> $by = carbon::relation::Index<string, Setting>();'));
-    assert($out->contains("            if ($m->settingName != null) \{\n                string $k = guard $m->settingName;\n                $keys->add($k);"));
-    assert($out->contains('            SettingQuery $q = $this->fetch->query($db, SettingTable::$name in $keys->list());'));
+    assert($out->contains("            if ($m->settingName != null) \{\n                string $k = guard $m->settingName;\n                Setting? $held = null;\n                if ($reuse) \{\n                    $held = $seen->find<string, Setting>($k);\n                }\n                if ($held == null) \{\n                    $keys->add($k);"));
+    assert($out->contains('            SettingQuery $q = guard $this->fetch->query($session, SettingTable::$name in $keys->list(), $seen) else ($e) { return .error($e); }'));
     // the related model of another namespace is named in full
-    assert($out->contains('    internal carbon::relation::Fetch<other::Note, other::NoteQuery> $fetch;'));
-    assert($out->contains('            other::NoteQuery $q = $this->fetch->query($db, other::NoteTable::$commentId in $keys->list());'));
+    assert($out->contains('    internal carbon::relation::Fetch<other::Note, other::NoteQuery, other::NoteRepository> $fetch;'));
+    assert($out->contains('            other::NoteQuery $q = guard $this->fetch->query($session, other::NoteTable::$commentId in $keys->list(), $seen) else ($e) { return .error($e); }'));
     assert($out->contains('        carbon::relation::Index<string, other::Note> $by = carbon::relation::Index<string, other::Note>();'));
     assert($out->contains('    function withNotes(function<other::NoteQuery(other::NoteQuery)> $constrain) : S'));
-    assert($out->contains('public class CommentRepository : carbon::Repository<app::Comment, app::CommentQuery, string>, CommentLoading'));
+    assert($out->contains('public struct CommentRepository : carbon::Repository<app::Comment, app::CommentQuery, string>, CommentWiring'));
 }
 
 test a_codec_column_is_loaded_and_stored_through_its_codec
@@ -190,7 +191,7 @@ test a_declared_query_feeds_the_generated_repository
     string $rest = blog();
     string $out = emitted("{$query}, {$rest}");
     assert(!$out->contains('public struct PostQuery'));
-    assert($out->contains("public class PostRepository : carbon::Repository<app::Post, app::Posts, int64>, PostLoading\n\{\n    public carbon::Connection $db;\n\n    public function query() : app::Posts\n    \{\n        return app::Posts($this->db);"));
+    assert($out->contains("public struct PostRepository : carbon::Repository<app::Post, app::Posts, int64>, PostWiring\n\{\n    public carbon::Session $session;\n}"));
     assert($out->contains(' * `Posts : carbon::Query<Post, Posts>, PostRelations<Posts>`.'));
 }
 
@@ -204,4 +205,48 @@ test a_table_in_another_database
     assert($out->contains("    public static function alias(string $alias, schema: string? $schema = 'catalog') : MovieGenreTableAlias"));
     // no mapping: a table is no model
     assert(!$out->contains('carbon::Schema<') && !$out->contains('MovieGenreRows') && !$out->contains('MovieGenreQuery'));
+}
+
+test a_version_column_guards_every_write
+{
+    array<string> $more = [field('revision', 2, prim('int32'), tool('version', ''), true)];
+    string $out = emitted(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($out->contains("    public const function version(const app::Note& $m) : int64?\n    {\n        return $m->revision as int64;\n    }"));
+    assert($out->contains("    public const function versionIs(int64 $version) : hydrahon::Term<bool>?\n    {\n        return NoteTable::$revision == $version;\n    }"));
+    assert($out->contains("    public const function revise(app::Note& $m, int64 $version) : void\n    {\n        $m->revision = $version as int32;\n    }"));
+    // a model without one keeps the defaults
+    array<string> $none = [];
+    assert(!emitted(model('app::Tag', 'tags', 1, 'app::TagRepository', $none))->contains('function version'));
+}
+
+test every_namespace_checks_its_wiring
+{
+    string $out = emitted(spread());
+    usize $app = $out->find("\nnamespace app;\n");
+    usize $other = $out->find("\nnamespace other;\n");
+    // one Carbon per namespace with models, after its models
+    usize $first = $out->find("public struct Carbon\n\{");
+    assert($first < $app);
+    assert($out->find("public struct Carbon\n\{", $app) < $other);
+    assert($out->find("public struct Carbon\n\{", $other) < $out->size());
+    // a namespace checks its own repositories and the ones its relations load through, each once
+    string $appCheck = $out->sub($app, $other - $app);
+    assert($appCheck->contains("        if (!$db->has<app::CommentRepository>()) \{\n            return .error(.unregistered('app::CommentRepository'));\n        }"));
+    assert($appCheck->contains("        if (!$db->has<SettingRepository>()) \{\n            return .error(.unregistered('SettingRepository'));\n        }"));
+    assert($appCheck->contains("        if (!$db->has<other::NoteRepository>()) \{"));
+    // and makes every store of its own models before any request runs
+    assert($appCheck->contains('        $db->store<app::Comment, string, app::CommentTable>();'));
+    assert(!$appCheck->contains('store<other::Note'));
+    // the relation names the repository it needs, for the error when it is missing
+    assert($out->contains("$this->fetch = carbon::relation::Fetch<other::Note, other::NoteQuery, other::NoteRepository>('other::NoteRepository');"));
+}
+
+test a_declared_carbon_would_clash
+{
+    array<string> $none = [];
+    string $taken = decl('class', 'app::Carbon', 30, '', '');
+    string $note = model('app::Note', 'notes', 1, 'app::NoteRepository', $none);
+    array<string> $p = problems("{$taken}, {$note}");
+    assert($p->count() == 1);
+    assert($p[0] == 'src/t.eco:1: app::Note: the generated app::Carbon would clash with the declaration of that name');
 }

@@ -3,7 +3,7 @@ namespace blog;
 #[carbon::model: 'users']
 public class User : carbon::Model<User, UserRepository>
 {
-    public carbon::Link<UserRepository> $link = .detached();
+    public carbon::Link $link = .detached();
 
     #[carbon::key]
     public int64 $id = 0;
@@ -20,7 +20,7 @@ public class User : carbon::Model<User, UserRepository>
     #[carbon::hasMany: 'authorId']
     public carbon::Many<Post> $posts = .unloaded();
 
-    public function link() : carbon::Link<UserRepository>&
+    public function link() : carbon::Link&
     {
         return $this->link;
     }

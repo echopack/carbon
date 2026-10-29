@@ -1,0 +1,28 @@
+namespace fixtures;
+
+use hydrahon::DateTime;
+
+/**
+ * A version column and a soft delete: every write is guarded by the revision the model was
+ * loaded with. Repository and query written by carbongen.
+ */
+#[carbon::model: 'drafts']
+public class Draft : carbon::Model<Draft, DraftRepository>
+{
+    public carbon::Link $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+    public string $text;
+
+    #[carbon::version]
+    public int32 $revision = 0;
+
+    #[carbon::deleted]
+    public DateTime? $deletedAt = null;
+
+    public function link() : carbon::Link&
+    {
+        return $this->link;
+    }
+}

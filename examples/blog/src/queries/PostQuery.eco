@@ -7,9 +7,9 @@ public struct PostQuery : carbon::Query<Post, PostQuery>, PostRelations<PostQuer
 {
     internal PostRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = PostRows($db);
+        $this->rows = PostRows($session);
     }
 
     public function rows() : PostRows&

@@ -10,4 +10,12 @@ public struct Traits
      * insert id (MySQL).
      */
     public bool $returning = false;
+
+    /**
+     * The affected count of an UPDATE is the rows it matched, not only the ones it changed. Only
+     * then does a write by key that touched no row mean the row is gone or changed underneath,
+     * and carbon answers it with `.stale`. MySQL counts matched rows once the connection asks for
+     * it (`foundRows`); `carbon::mysql::Driver::open` does.
+     */
+    public bool $matched = false;
 }

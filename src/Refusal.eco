@@ -1,0 +1,78 @@
+namespace carbon;
+
+/**
+ * Why a hook or an observer refused a write: a message for people, a code for programs, and
+ * when the app wants one, a detail of its own type the caller reads back with `detail<T>()`.
+ *
+ * ```echo
+ * return .error(.refused(carbon::Refusal('a post needs a title')));
+ * return .error(.refused(carbon::Refusal::of('post.invalid', 'fix the fields', $fields)));
+ *
+ * match ($s->failure()) {
+ *     carbon::Error::refused($why) => {
+ *         Fields? $bad = $why->detail<Fields>();
+ *     },
+ *     else => {},
+ * };
+ * ```
+ */
+public struct Refusal
+{
+    /**
+     * What a program matches on, `post.invalid`; empty when only a message was given.
+     */
+    public string $code;
+
+    /**
+     * What a person reads.
+     */
+    public string $message;
+
+    internal type_id? $kind = null;
+    internal erased? $detail = null;
+
+    public constructor(string $message)
+    {
+        $this->code = '';
+        $this->message = $message;
+    }
+
+    public constructor(code: string $code, string $message)
+    {
+        $this->code = $code;
+        $this->message = $message;
+    }
+
+    /**
+     * A refusal carrying `$detail`, read back with `detail<T>()`.
+     */
+    public static function of<T : class>(string $code, string $message, T $detail) : Refusal
+    {
+        Refusal $r = Refusal(code: $code, $message);
+        $r->kind = type_id<T>();
+        $r->detail = erased::from($detail);
+        return $r;
+    }
+
+    /**
+     * The detail, when it is a `T`; null when there is none or it is of another type.
+     */
+    public const function detail<T : class>() : T?
+    {
+        type_id? $k = $this->kind;
+        if ($k == null) {
+            return null;
+        }
+        type_id $kind = guard $k;
+        if ($kind != type_id<T>()) {
+            return null;
+        }
+        erased $held = guard $this->detail;
+        T $value;
+        // sound: the kind was checked against T, and of is the only writer of both
+        unsafe {
+            $value = assume<T>($held);
+        }
+        return $value;
+    }
+}

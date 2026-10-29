@@ -1,15 +1,17 @@
 /*
  * carbon: an active record library for Echo.
  *
- * Models are classes that keep a weak link to the repository that adopted
- * them, and conform to carbon::Model for save, delete and the rest. A
- * query is an immutable struct conforming to carbon::Query: scopes, its own
- * state, joins and terminals, with apply() to turn that state into SQL
- * right before it runs. A repository is a class conforming to
+ * Work happens in a carbon::Session: the Db's own, $db->session(), or one
+ * per request. Models are classes that keep a weak link to the session they
+ * were loaded in, and conform to carbon::Model for save, delete and the
+ * rest. A query is an immutable struct conforming to carbon::Query: scopes,
+ * its own state, joins and terminals, with apply() to turn that state into
+ * SQL right before it runs. A repository is a struct conforming to
  * carbon::Repository: writes, hooks, finders and its dependencies,
- * registered once on a carbon::Db and reached by its type from then on:
- * $db->repo<PostRepository>()->find()->withAuthor()->get(). All SQL
- * is built with hydrahon; a Driver renders it in its dialect and runs it.
+ * registered once on a carbon::Db by type and built for every session:
+ * $session->repo<PostRepository>()->find()->withAuthor()->get(). The
+ * generated Carbon::check($db) finds a repository left out at startup. All
+ * SQL is built with hydrahon; a Driver renders it in its dialect and runs it.
  * The mapping between a model and its table is a Schema, written by
  * carbongen from #[carbon::*] attributes or by hand, with every column as a
  * static: PostTable::$title. A field with no column type of its own goes

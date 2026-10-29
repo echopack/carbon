@@ -124,7 +124,7 @@ test each_stops_at_the_first_failure
     Seen $seen = Seen();
     status<Error> $s = $w->notes->find()->each(function[$seen](Note $n) : status<Error> {
         $seen->titles[] = $n->title;
-        return .error(.refused('enough'));
+        return .error(.refused(carbon::Refusal('enough')));
     });
     assert($s->failed());
     assert($seen->titles->count() == 1);
@@ -159,7 +159,7 @@ test batches_stop_on_an_empty_page_and_at_a_refusal
     assert($w->fake->count() == 2);
     $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b')]);
     status<Error> $s = $w->notes->each(batch: 2, function(array<Note> $batch) : status<Error> {
-        return .error(.refused('one is enough'));
+        return .error(.refused(carbon::Refusal('one is enough')));
     });
     assert($s->failed());
     assert($w->fake->count() == 3);

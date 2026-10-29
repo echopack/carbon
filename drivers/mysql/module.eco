@@ -14,7 +14,9 @@
 
 #[depends: "../.."]
 #[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
-#[requires: "echolang/libmysql" { version: "^0.1", source: git "https://github.com/echolang/libmysql" }]
+// TEMPORARY: the local checkout until libmysql with Options->foundRows is released; then
+// back to #[requires: "echolang/libmysql" { version: "^0.1.2", source: git "https://github.com/echolang/libmysql" }]
+#[depends: "../../../libmysql"]
 
 #[sources: "src/*.eco"]
 

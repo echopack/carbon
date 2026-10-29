@@ -4,18 +4,26 @@ namespace carbon::relation;
  * How a relation queries its related models `T` through their query type `Q`: an optional
  * query to start from, extra conditions, callbacks that change the query and the relations of
  * `T` to load in turn. A relation keeps one and builds its query with it, so nesting and
- * constraints need no code of their own. The query starts from the repository registered for
- * `T`, its `query()`, so the related model's scopes, state and `apply()` all take part.
+ * constraints need no code of their own. The query starts from `R`, the repository registered
+ * for `T`, built for the session the relation loads in: its `query()`, so the related model's
+ * scopes, state and `apply()` all take part.
  */
-public class Fetch<T, Q>
+public class Fetch<T, Q, R>
 {
     internal Q? $base = null;
     internal array<hydrahon::Term<bool>> $conditions = [];
     internal array<function<Q(Q)>> $callbacks = [];
     internal array<Eager<T>> $nested = [];
 
-    public constructor()
+    /**
+     * The repository the related models load through, by name, for the error when it is not
+     * registered: `blog::UserRepository`.
+     */
+    internal string $target;
+
+    public constructor(string $target)
     {
+        $this->target = $target;
     }
 
     /**
@@ -47,11 +55,14 @@ public class Fetch<T, Q>
     }
 
     /**
-     * The query for the related rows `$keys` picks, constraints and nested relations applied.
+     * The query for the related rows `$keys` picks, constraints and nested relations applied;
+     * `.unregistered` when the repository of the related models is not registered.
      */
-    public const function query(Connection $db, hydrahon::Term<bool> $keys) : Q
+    public const function query(Session $session, hydrahon::Term<bool> $keys, Loaded $seen) : result<Q, Error>
     {
-        Q $q = $this->start($db);
+        Q $q = guard $this->start($session) else ($e) { return .error($e); }
+        $q->rows()->seen = $seen;
+        $q->rows()->readonly = $seen->readonly;
         // the query is this method's own, so it changes in place rather than copy by copy
         $q->rows()->conditions[] = $keys;
         foreach ($this->conditions as const &$c) {
@@ -63,23 +74,33 @@ public class Fetch<T, Q>
         foreach ($this->nested as const &$n) {
             $q->rows()->eager[] = $n;
         }
-        return $q;
+        return .ok($q);
+    }
+
+    /**
+     * Whether the relation takes the related models as they are: no base query, conditions,
+     * constraints or nested relations. Only then may it reuse a model the load already holds,
+     * which none of those were applied to.
+     */
+    public const function plain() : bool
+    {
+        return $this->base == null && $this->conditions->count() == 0 && $this->callbacks->count() == 0
+            && $this->nested->count() == 0;
     }
 
     /**
      * The base query, or the related repository's own when there is none.
      */
-    internal const function start(Connection $db) : Q
+    internal const function start(Session $session) : result<Q, Error>
     {
         if ($this->base != null) {
             Q $b = guard $this->base;
-            return $b;
+            return .ok($b);
         }
-        // a bare query only finds the store; the repository registered for it builds the real one
-        Q $bare = Q($db);
-        $repo = guard $bare->rows()->store->owner() else {
-            die('carbon: a relation loads models whose repository is not registered on the Db');
+        R $repo = guard $session->repo<R>() else {
+            return .error(.unregistered($this->target));
         };
-        return $repo->query();
+        Q $q = $repo->query();
+        return .ok($q);
     }
 }

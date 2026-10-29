@@ -30,6 +30,12 @@ public class Driver<D : hydrahon::Dialect> : carbon::Driver
      */
     public array<Statement> $statements = [];
 
+    /**
+     * Whether the affected counts it answers are the rows matched, as `Traits::matched` says.
+     * On by default, so a write by key answered with `written(0)` comes back `.stale`.
+     */
+    public bool $matched = true;
+
     public constructor()
     {
         $this->dialect = D();
@@ -197,7 +203,7 @@ public class Driver<D : hydrahon::Dialect> : carbon::Driver
 
     public const function traits() : Traits
     {
-        return Traits($this->dialect->supports(hydrahon::Feature::returning));
+        return Traits($this->dialect->supports(hydrahon::Feature::returning), $this->matched);
     }
 
     public function begin() : status<Error>

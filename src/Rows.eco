@@ -8,10 +8,11 @@ use carbon::select::Selected;
  * A value: copying it copies the query. A query struct keeps one and hands it out through
  * `Query::rows()`; carbongen writes the alias, `PostRows`.
  */
-public struct Rows<M, K, S, R>
+public struct Rows<M, K, S>
 {
+    internal Session $session;
     internal Connection $db;
-    internal Store<M, K, S, R> $store;
+    internal Store<M, K, S> $store;
     internal hydrahon::Select $select;
     internal array<hydrahon::Term<bool>> $conditions = [];
     internal array<hydrahon::Order> $orders = [];
@@ -22,18 +23,31 @@ public struct Rows<M, K, S, R>
     internal Selected $selected = Selected();
 
     /**
+     * The load this query runs in, when a relation runs it: what it reads goes there, and its
+     * relations reuse what is there. Null for a query of its own.
+     */
+    internal Loaded? $seen = null;
+
+    /**
+     * Whether the models this query finds are only read: no copy of their rows is kept, and
+     * writing them is refused. Relations loaded with them are read-only too.
+     */
+    internal bool $readonly = false;
+
+    /**
      * Whether a join, group, having, distinct or `adjust` changed the SELECT beyond its
      * conditions, which a bulk UPDATE or DELETE cannot carry.
      */
     internal bool $shaped = false;
 
     /**
-     * Every live row of `M` on `$db`.
+     * Every live row of `M`, read in `$session`.
      */
-    public constructor(Connection $db)
+    public constructor(Session $session)
     {
-        $this->db = $db;
-        $this->store = $db->store<M, K, S, R>();
+        $this->session = $session;
+        $this->db = $session->connection;
+        $this->store = $session->store<M, K, S>();
         $this->select = hydrahon::Select(from: $this->store->table->table());
     }
 
@@ -102,7 +116,11 @@ public struct Rows<M, K, S, R>
                 break;
             }
             M $model = guard $this->store->table->read($rows, $this->selected) else ($e) { return .error($e); }
-            $this->store->settle($model);
+            if ($this->readonly) {
+                $this->store->glance($model, $this->session);
+            } else {
+                $this->store->settle($model, $this->session);
+            }
             guard $visit($model) else ($e) { return .error($e); }
         }
         return .ok();
@@ -114,7 +132,7 @@ public struct Rows<M, K, S, R>
      */
     internal function batches(uint64 $size, function<status<Error>(array<M>)> $visit) : status<Error>
     {
-        Rows<M, K, S, R> $page = $this;
+        Rows<M, K, S> $page = $this;
         $page->orders = [$this->store->table->byKey()];
         $page->take = $size;
         $page->skip = null;
@@ -204,11 +222,20 @@ public struct Rows<M, K, S, R>
     internal function run(const hydrahon::Select& $q) : result<array<M>, Error>
     {
         Cursor $rows = guard $this->db->query($q) else ($e) { return .error($e); }
-        array<M> $found = guard $this->store->load($rows, $this->selected) else ($e) { return .error($e); }
-        if ($found->count() > 0) {
-            foreach ($this->eager as &$e) {
-                guard $e->load($found, $this->db) else ($err) { return .error($err); }
+        array<M> $found = guard $this->store->load($rows, $this->selected, $this->session, $this->readonly) else ($e) { return .error($e); }
+        if ($found->count() == 0 || $this->eager->count() == 0) {
+            return .ok(mv $found);
+        }
+        // a query of its own starts a load; one a relation runs is part of the relation's, which
+        // keeps what it reads itself
+        Loaded $seen = $this->seen ?? Loaded(readonly: $this->readonly);
+        if ($this->seen == null) {
+            foreach ($found as const &$m) {
+                $seen->add<K, M>($this->store->table->keyOf($m), $m);
             }
+        }
+        foreach ($this->eager as &$e) {
+            guard $e->load($found, $this->session, $seen) else ($err) { return .error($err); }
         }
         return .ok(mv $found);
     }

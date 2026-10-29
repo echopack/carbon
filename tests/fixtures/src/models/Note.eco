@@ -11,7 +11,7 @@ use hydrahon::DateTime;
 #[carbon::model: 'notes']
 public class Note : carbon::Model<Note, NoteRepository>
 {
-    public carbon::Link<NoteRepository> $link = .detached();
+    public carbon::Link $link = .detached();
 
     #[carbon::key]
     public int64 $id = 0;
@@ -35,7 +35,7 @@ public class Note : carbon::Model<Note, NoteRepository>
     #[carbon::hasMany: 'noteId']
     public carbon::Many<Tag> $tags = .unloaded();
 
-    public function link() : carbon::Link<NoteRepository>&
+    public function link() : carbon::Link&
     {
         return $this->link;
     }

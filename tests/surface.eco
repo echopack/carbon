@@ -9,7 +9,7 @@ use fixtures::{World, Note, Tag, Setting, NoteQuery, NoteTable, TagTable, Settin
 test every_error_reads_well
 {
     Error $detached = .detached;
-    assert(str::from($detached) == 'the model is not linked to a live repository');
+    assert(str::from($detached) == 'the model is not linked to a live session');
     Error $nested = .nested;
     assert(str::from($nested) == 'a transaction is already open');
     Error $invalid = .invalid('bad filter');
@@ -221,9 +221,10 @@ test a_db_runs_on_the_clock_it_is_given
     $fake = fake::Driver<Mysql>();
     carbon::clock::Fixed $clock = carbon::clock::Fixed(unix: 0);
     Db $db = Db($fake, clock: $clock);
-    $db->register(fixtures::NoteRepository($db->connection()));
+    guard $db->register<fixtures::NoteRepository>();
     $fake->written($insertId: 1);
-    Note $n = guard $db->repo<fixtures::NoteRepository>()->create(Note($title: 'Epoch'));
+    fixtures::NoteRepository $notes = guard $db->session()->repo<fixtures::NoteRepository>();
+    Note $n = guard $notes->create(Note($title: 'Epoch'));
     DateTime $at = guard $n->createdAt;
     assert($at->year == 1970);
     // the system clock is the default, and it is not 1970
@@ -284,14 +285,14 @@ test a_transaction_that_cannot_begin_runs_no_work
     $d->failBegin = true;
     Db $db = Db($d);
     Done $ran = Done();
-    status<Error> $s = $db->transaction(function[$ran]() : status<Error> {
+    status<Error> $s = $db->session()->transaction(function[$ran]() : status<Error> {
         $ran->yes = true;
         return .ok();
     });
     assert($s->failure()->fault() == Fault::connection);
     assert(!$ran->yes);
     assert(!$db->inTransaction());
-    result<int64, Error> $r = $db->transaction(function[$ran]() : result<int64, Error> {
+    result<int64, Error> $r = $db->session()->transaction(function[$ran]() : result<int64, Error> {
         $ran->yes = true;
         return .ok(1);
     });
@@ -303,14 +304,14 @@ test a_failed_commit_is_the_error
     Flaky $d = Flaky();
     $d->failCommit = true;
     Db $db = Db($d);
-    status<Error> $s = $db->transaction(function() : status<Error> { return .ok(); });
+    status<Error> $s = $db->session()->transaction(function() : status<Error> { return .ok(); });
     assert($s->failure()->retryable());
     assert(!$db->inTransaction());
-    result<int64, Error> $r = $db->transaction(function() : result<int64, Error> { return .ok(1); });
+    result<int64, Error> $r = $db->session()->transaction(function() : result<int64, Error> { return .ok(1); });
     assert($r->failure()->retryable());
     // the connection takes the next transaction
     $d->failCommit = false;
-    guard $db->transaction(function() : status<Error> { return .ok(); });
+    guard $db->session()->transaction(function() : status<Error> { return .ok(); });
     assert(str::join($d->inner->texts(), ' | ') == 'BEGIN | BEGIN | BEGIN | COMMIT');
 }
 
@@ -320,7 +321,7 @@ test writes_inside_a_transaction
     $w->fake->written($insertId: 1)->written($insertId: 2);
     fixtures::NoteRepository $notes = $w->notes;
     fixtures::TagRepository $tags = $w->tags;
-    Tag $made = guard $w->db->transaction(function[$notes, $tags]() : result<Tag, Error> {
+    Tag $made = guard $w->db->session()->transaction(function[$notes, $tags]() : result<Tag, Error> {
         Note $n = guard $notes->create(Note($title: 'Parent')) else ($e) { return .error($e); }
         return $tags->create(Tag($noteId: $n->id, $name: 'child'));
     });
@@ -637,13 +638,13 @@ class Parrot : carbon::Observer<Note>
     public fixtures::Trail $trail;
     public string $name;
 
-    public function before(Event $event, Note& $model) : status<Error>
+    public function before(carbon::Session $session, Event $event, Note& $model) : status<Error>
     {
         $this->trail->heard[] = "{$this->name} before";
         return .ok();
     }
 
-    public function after(Event $event, const Note& $model) : void
+    public function after(carbon::Session $session, Event $event, const Note& $model) : void
     {
         $this->trail->heard[] = "{$this->name} after";
     }

@@ -1,11 +1,20 @@
 namespace fixtures;
 
-public class SettingRepository : carbon::Repository<Setting, SettingQuery, string>
+/**
+ * A repository over a schema written by hand: no carbongen wiring to name, so it hands out its
+ * session and the model's store itself.
+ */
+public struct SettingRepository : carbon::Repository<Setting, SettingQuery, string>
 {
-    public carbon::Connection $db;
+    public carbon::Session $session;
 
-    public function query() : SettingQuery
+    public function session() : carbon::Session
     {
-        return SettingQuery($this->db);
+        return $this->session;
+    }
+
+    public function store() : carbon::Store<Setting, string, SettingTable>
+    {
+        return $this->session->store<Setting, string, SettingTable>();
     }
 }

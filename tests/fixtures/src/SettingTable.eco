@@ -9,7 +9,7 @@ use hydrahon::{Value, DateTime, Term, Field, Values, Table};
 use carbon::{Cursor, Event, Link, Problem};
 use carbon::change::{Changes, Snapshot};
 
-public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string, SettingRepository>
+public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string>
 {
     public const Term<string> $name;
     public const Term<string> $value;
@@ -98,7 +98,7 @@ public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string, Se
     {
     }
 
-    public const function link(Setting& $m) : Link<SettingRepository>&
+    public const function link(Setting& $m) : Link&
     {
         return $m->link;
     }

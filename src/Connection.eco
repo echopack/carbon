@@ -4,10 +4,9 @@ use std::time;
 use carbon::listen::Ran;
 
 /**
- * What repositories and queries run on: the driver, the clock timestamps come from, the
- * listeners that hear about every statement and the stores of every model. A `Db` owns one and
- * hands it to the repositories it registers, `PostRepository($db->connection())`. Nothing in
- * carbon is global; whatever a store needs, it reaches through its `Connection`.
+ * What sessions run on: the driver, the clock timestamps come from, the listeners that hear
+ * about every statement, the open transaction and how to undo what it wrote into models. A `Db`
+ * owns one. Nothing in carbon is global.
  */
 public class Connection
 {
@@ -15,7 +14,12 @@ public class Connection
     public Clock $clock;
     internal array<Listener> $listeners = [];
     internal bool $open = false;
-    internal map<type_id, erased> $stores = [];
+
+    /**
+     * How to put back every model a write of the open transaction changed, in the order the
+     * writes ran. A rollback runs it backwards; a commit forgets it.
+     */
+    internal array<function<void()>> $undo = [];
     internal map<string, string> $schemas = [];
 
     public constructor(Driver $driver)
@@ -59,25 +63,6 @@ public class Connection
     public function listen(Listener $listener) : void
     {
         $this->listeners[] = $listener;
-    }
-
-    /**
-     * The one store of model `M` on this connection, made the first time it is asked for. The
-     * connection owns its stores; a store holds no reference back.
-     */
-    public function store<M, K, S, R>() : Store<M, K, S, R>
-    {
-        type_id $id = type_id<Store<M, K, S, R>>();
-        if (!$this->stores->has($id)) {
-            $this->stores[$id] = erased::from(Held<Store<M, K, S, R>>(Store<M, K, S, R>()));
-        }
-        erased $held = $this->stores->get($id);
-        Held<Store<M, K, S, R>> $entry;
-        // sound: only this method writes the key, always with this type
-        unsafe {
-            $entry = assume<Held<Store<M, K, S, R>>>($held);
-        }
-        return $entry->value;
     }
 
     /**
@@ -188,15 +173,49 @@ public class Connection
     }
 
     /**
-     * Close the open transaction, committing it or rolling it back.
+     * Close the open transaction, committing it or rolling it back. Whatever the database does
+     * not keep, the models do not keep either: a rollback, or a commit that failed, puts every
+     * model the transaction wrote back the way it was before.
      */
     internal function close(bool $commit) : status<Error>
     {
         $this->open = false;
         if ($commit) {
-            return $this->control(.commit);
+            status<Error> $done = $this->control(.commit);
+            if ($done->failed()) {
+                $this->revert();
+            } else {
+                $this->undo = [];
+            }
+            return $done;
         }
+        $this->revert();
         return $this->control(.rollback);
+    }
+
+    /**
+     * Keep `$step` to run if the open transaction rolls back. Outside a transaction a write
+     * stands on its own, and nothing is kept.
+     */
+    internal function journal(function<void()> $step) : void
+    {
+        if ($this->open) {
+            $this->undo[] = $step;
+        }
+    }
+
+    /**
+     * Run the undo steps backwards and forget them.
+     */
+    internal function revert() : void
+    {
+        usize $i = $this->undo->count();
+        while ($i > 0) {
+            $i = $i - 1;
+            function<void()> $step = $this->undo[$i];
+            $step();
+        }
+        $this->undo = [];
     }
 
     internal function fetch(result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Cursor, Error>
@@ -248,19 +267,5 @@ public class Connection
         foreach ($this->listeners as &$l) {
             $l->ran($event);
         }
-    }
-}
-
-/**
- * A store as the connection keeps it, or a repository as the `Db` keeps it, behind an erased
- * handle keyed by its type.
- */
-internal class Held<T : class>
-{
-    internal T $value;
-
-    internal constructor(T $value)
-    {
-        $this->value = $value;
     }
 }

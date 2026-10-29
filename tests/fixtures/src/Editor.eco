@@ -1,0 +1,14 @@
+namespace fixtures;
+
+/**
+ * Who a session works for: the context a request hands its session.
+ */
+public class Editor
+{
+    public string $name;
+
+    public constructor(string $name)
+    {
+        $this->name = $name;
+    }
+}

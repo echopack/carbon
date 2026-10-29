@@ -62,7 +62,7 @@ test a_const_key_the_app_assigns_is_fine
 
 test generated_relation_types_cannot_take_a_declared_name
 {
-    array<string> $names = ['PostRelations', 'PostLoad', 'PostLoading'];
+    array<string> $names = ['PostRelations', 'PostLoad', 'PostWiring'];
     foreach ($names as const &$name) {
         string $taken = decl('struct', "app::{$name}", 40, '', '');
         array<string> $p = problems(both($taken, blog()));
@@ -294,7 +294,7 @@ test reports_more_model_problems
     assert($p[10] == 'src/t.eco:11: app::Note::$left: one #[carbon::deleted] per model');
     assert($p[11] == 'src/t.eco:13: app::Note::$nick: #[carbon::name] needs a column name');
     assert($p[12] == 'src/t.eco:14: app::Note::$count: a computed field is only there when a query selects it, so it needs to be nullable or have a default');
-    assert($p[13] == 'src/t.eco:15: app::Note::$total: a computed field is only read: no key, timestamp or codec');
+    assert($p[13] == 'src/t.eco:15: app::Note::$total: a computed field is only read: no key, timestamp, version or codec');
     assert($p[14] == 'src/t.eco:1: app::Note: one key per model, 2 are marked');
 }
 
@@ -374,23 +374,22 @@ test an_undeclared_repository_has_to_live_beside_the_model
     assert($p[0] == 'src/t.eco:1: app::Note: other::NoteRepository is not declared; declare it, or name one in app for carbongen to write');
 }
 
-test an_unknown_link_type_is_the_generated_repository
+test a_model_without_its_conformance_gets_the_generated_repository
 {
-    // echoc cannot name a repository carbongen has not written yet: the decls pass says unknown
-    string $unknown = '{"name": "link", "visibility": "public", "static": false, "line": 2, "type": {"kind": "named", "name": "unknown"}, "default": true, "default_value": ".detached()", "tools": []}';
-    string $note = decl('class', 'app::Note', 1, tool('model', 'notes'), both($unknown, field('id', 3, prim('int64'), '', true)));
+    // echoc drops carbon::Model<Note, NoteRepository> while NoteRepository is still to be written
+    string $note = decl('class', 'app::Note', 1, tool('model', 'notes'), both(link(''), field('id', 3, prim('int64'), '', true)));
     Schema $s = Schema::read(decls($note));
     assert($s->problems->count() == 0);
     assert($s->models[0]->repository == 'app::NoteRepository' && !$s->models[0]->repositoryDeclared);
     string $out = Emitter($s)->render();
-    assert($out->contains('public type NoteRepository = carbon::Records<app::Note, app::NoteQuery, int64>;'));
-    // any other default is no link carbongen can tell
-    string $odd = str::replace($unknown, '.detached()', 'make()');
+    assert($out->contains("public struct NoteRepository : carbon::Repository<app::Note, app::NoteQuery, int64>, NoteWiring\n\{\n    public carbon::Session $session;\n}"));
+    // a field of a type echoc cannot name is no link
+    string $odd = '{"name": "link", "visibility": "public", "static": false, "line": 2, "type": {"kind": "named", "name": "unknown"}, "default": true, "default_value": "make()", "tools": []}';
     string $other = decl('class', 'app::Other', 1, tool('model', 'others'), both($odd, field('id', 3, prim('int64'), '', true)));
     array<string> $p = problems($other);
     assert($p->count() == 2);
     assert($p[0] == "src/t.eco:2: app::Other::$link: no column type for unknown; add #[carbon::codec: 'json'] (or csv, lines, a codec of your own) or mark it #[carbon::skip]");
-    assert($p[1] == 'src/t.eco:1: app::Other: a model needs a carbon::Link<Repository> field: public carbon::Link<PostRepository> $link = .detached();');
+    assert($p[1] == 'src/t.eco:1: app::Other: a model needs a carbon::Link field: public carbon::Link $link = .detached();');
 }
 
 test enums_of_one_name_cannot_share_a_column_type
@@ -449,4 +448,25 @@ test two_relations_cannot_share_a_class
     assert($p->count() == 2);
     assert($p[0] == 'app::Post::$FooBar: its generated class PostFooBarRelation is the one of app::Post::$fooBar too; rename one of them');
     assert($p[1] == 'app::PostFoo::$bar: its generated class PostFooBarRelation is the one of app::Post::$fooBar too; rename one of them');
+}
+
+test a_version_is_one_int_counter
+{
+    string $dt = optional(named('hydrahon::DateTime', ''));
+    array<string> $more = [
+        field('rev', 3, prim('string'), tool('version', ''), true),
+        field('seen', 4, optional(prim('int64')), tool('version', ''), true),
+        field('turn', 5, fixed(prim('int64')), tool('version', ''), true),
+        field('at', 6, $dt, both(tool('version', ''), tool('updated', '')), true),
+    ];
+    array<string> $p = problems(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($p->count() == 8);
+    assert($p[0] == 'src/t.eco:3: app::Note::$rev: #[carbon::version] goes on an int32 or int64 field');
+    assert($p[1] == 'src/t.eco:4: app::Note::$seen: #[carbon::version] goes on an int32 or int64 field');
+    assert($p[2] == 'src/t.eco:4: app::Note::$seen: one #[carbon::version] per model');
+    assert($p[3] == 'src/t.eco:5: app::Note::$turn: #[carbon::version] cannot go on a const field, carbon sets it');
+    assert($p[4] == 'src/t.eco:5: app::Note::$turn: one #[carbon::version] per model');
+    assert($p[5] == 'src/t.eco:6: app::Note::$at: #[carbon::version] goes on an int32 or int64 field');
+    assert($p[6] == 'src/t.eco:6: app::Note::$at: #[carbon::version] is a counter of its own, not a key or a timestamp');
+    assert($p[7] == 'src/t.eco:6: app::Note::$at: one #[carbon::version] per model');
 }

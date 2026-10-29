@@ -59,9 +59,266 @@ public class NoteCountTableAlias : hydrahon::Source
 }
 
 /**
+ * The columns of `drafts` and how `Draft` maps onto them.
+ */
+public class DraftTable : hydrahon::Source, carbon::Schema<fixtures::Draft, int64>
+{
+    public static hydrahon::Term<int64> $id = carbon::select::column<int64>('drafts', 'id');
+    public static hydrahon::Term<string> $text = carbon::select::column<string>('drafts', 'text');
+    public static hydrahon::Term<int64> $revision = carbon::select::column<int64>('drafts', 'revision');
+    public static hydrahon::Term<hydrahon::DateTime?> $deletedAt = carbon::select::column<hydrahon::DateTime?>('drafts', 'deleted_at');
+    private hydrahon::Table $carbonTable;
+
+    public constructor()
+    {
+        $this->carbonTable = hydrahon::Table(name: 'drafts');
+    }
+
+    /**
+     * The table under `$alias`, to join it, or join it twice: `$p = DraftTable::alias('p');`, then
+     * `$p->id`. `$schema` names the database for a table that lives in
+     * another one.
+     */
+    public static function alias(string $alias, schema: string? $schema = null) : DraftTableAlias
+    {
+        return DraftTableAlias(alias: $alias, schema: $schema);
+    }
+
+    public const function table() : hydrahon::Table
+    {
+        return $this->carbonTable;
+    }
+
+    public const function fields() : array<hydrahon::Field>
+    {
+        array<hydrahon::Field> $out = [DraftTable::$id, DraftTable::$text, DraftTable::$revision, DraftTable::$deletedAt];
+        return $out;
+    }
+
+    public const function keyIs(int64 $key) : hydrahon::Term<bool>
+    {
+        return DraftTable::$id == $key;
+    }
+
+    public const function keyIn(const array<int64>& $keys) : hydrahon::Term<bool>
+    {
+        return DraftTable::$id in $keys;
+    }
+
+    public const function keyAfter(int64 $key) : hydrahon::Term<bool>
+    {
+        return DraftTable::$id > $key;
+    }
+
+    public const function byKey() : hydrahon::Order
+    {
+        return DraftTable::$id->asc();
+    }
+
+    public const function keyAt() : usize
+    {
+        return 0;
+    }
+
+    public const function generated() : bool
+    {
+        return true;
+    }
+
+    public const function keyOf(const fixtures::Draft& $m) : int64
+    {
+        return $m->id;
+    }
+
+    public const function read(const carbon::Cursor& $row, const carbon::select::Selected& $extra) : result<fixtures::Draft, carbon::Error>
+    {
+        int64 $c0 = guard $row->int(0) else { return .error(.column('id', carbon::Problem::of($row, 0))); }
+        string $c1 = guard $row->text(1) else { return .error(.column('text', carbon::Problem::of($row, 1))); }
+        int64 $r2 = guard $row->int(2) else { return .error(.column('revision', carbon::Problem::of($row, 2))); }
+        if ($r2 < -2147483648 || $r2 > 2147483647) {
+            return .error(.column('revision', .range));
+        }
+        int32 $c2 = $r2 as int32;
+        hydrahon::DateTime? $c3 = null;
+        if (!$row->isNull(3)) {
+            hydrahon::DateTime $v3 = guard $row->datetime(3) else { return .error(.column('deleted_at', carbon::Problem::of($row, 3))); }
+            $c3 = $v3;
+        }
+        return .ok(fixtures::Draft($id: $c0, $text: $c1, $revision: $c2, $deletedAt: $c3));
+    }
+
+    public const function snapshot(const fixtures::Draft& $m) : carbon::change::Snapshot
+    {
+        carbon::change::Snapshot $out = carbon::change::Snapshot();
+        int64 $s0 = $m->id;
+        $out->values[] = hydrahon::Value::from($s0);
+        string $s1 = $m->text;
+        $out->values[] = hydrahon::Value::from($s1);
+        int64 $s2 = $m->revision as int64;
+        $out->values[] = hydrahon::Value::from($s2);
+        hydrahon::DateTime? $s3 = $m->deletedAt;
+        $out->values[] = hydrahon::Value::from($s3);
+        return $out;
+    }
+
+    public const function write(const fixtures::Draft& $m, const carbon::change::Changes& $only, hydrahon::Values& $into) : void
+    {
+        if ($only->has(0)) {
+            int64 $s0 = $m->id;
+            $into[DraftTable::$id] = $s0;
+        }
+        if ($only->has(1)) {
+            string $s1 = $m->text;
+            $into[DraftTable::$text] = $s1;
+        }
+        if ($only->has(2)) {
+            int64 $s2 = $m->revision as int64;
+            $into[DraftTable::$revision] = $s2;
+        }
+        if ($only->has(3)) {
+            hydrahon::DateTime? $s3 = $m->deletedAt;
+            $into[DraftTable::$deletedAt] = $s3;
+        }
+    }
+
+    public const function inserted(fixtures::Draft& $m, int64 $key) : void
+    {
+        $m->id = $key;
+    }
+
+    public const function link(fixtures::Draft& $m) : carbon::Link&
+    {
+        return $m->link;
+    }
+
+    public const function stamp(fixtures::Draft& $m, carbon::Event $event, hydrahon::DateTime $now) : void
+    {
+    }
+
+    public const function trash(fixtures::Draft& $m, hydrahon::DateTime? $at) : bool
+    {
+        $m->deletedAt = $at;
+        return true;
+    }
+
+    public const function trashed(const fixtures::Draft& $m) : hydrahon::DateTime?
+    {
+        return $m->deletedAt;
+    }
+
+    public const function live() : hydrahon::Term<bool>?
+    {
+        return DraftTable::$deletedAt->isNull();
+    }
+
+    public const function version(const fixtures::Draft& $m) : int64?
+    {
+        return $m->revision as int64;
+    }
+
+    public const function versionIs(int64 $version) : hydrahon::Term<bool>?
+    {
+        return DraftTable::$revision == $version;
+    }
+
+    public const function revise(fixtures::Draft& $m, int64 $version) : void
+    {
+        $m->revision = $version as int32;
+    }
+}
+
+/**
+ * `drafts` under an alias, from `DraftTable::alias`.
+ */
+public class DraftTableAlias : hydrahon::Source
+{
+    public const hydrahon::Term<int64> $id;
+    public const hydrahon::Term<string> $text;
+    public const hydrahon::Term<int64> $revision;
+    public const hydrahon::Term<hydrahon::DateTime?> $deletedAt;
+    private hydrahon::Table $carbonTable;
+
+    public constructor(alias: string $alias, schema: string? $schema = null)
+    {
+        $this->carbonTable = hydrahon::Table(name: 'drafts', alias: $alias, $schema: $schema);
+    }
+
+    init
+    {
+        $this->id = $this->carbonTable->column<int64>('id');
+        $this->text = $this->carbonTable->column<string>('text');
+        $this->revision = $this->carbonTable->column<int64>('revision');
+        $this->deletedAt = $this->carbonTable->column<hydrahon::DateTime?>('deleted_at');
+    }
+
+    public const function table() : hydrahon::Table
+    {
+        return $this->carbonTable;
+    }
+}
+
+/**
+ * What a query for `Draft` models gathers: the field a query struct keeps.
+ */
+public type DraftRows = carbon::Rows<fixtures::Draft, int64, fixtures::DraftTable>;
+
+/**
+ * A query for `Draft` models. Declare a struct conforming to
+ * `carbon::Query<Draft, …>` in its place to give it scopes of its own.
+ */
+public struct DraftQuery : carbon::Query<fixtures::Draft, DraftQuery>
+{
+    internal DraftRows $rows;
+
+    public constructor(carbon::Session $session)
+    {
+        $this->rows = DraftRows($session);
+    }
+
+    public function rows() : DraftRows&
+    {
+        return $this->rows;
+    }
+}
+
+/**
+ * The repository of `Draft` models: writes and queries, nothing of its own. Declare a
+ * struct conforming to `carbon::Repository<Draft, …>` in its place for finders and hooks.
+ */
+public struct DraftRepository : carbon::Repository<fixtures::Draft, fixtures::DraftQuery, int64>, DraftWiring
+{
+    public carbon::Session $session;
+}
+
+/**
+ * What a repository of `Draft` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `DraftRepository : carbon::Repository<Draft, …>, DraftWiring`.
+ */
+public interface DraftWiring
+{
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Draft` models, shared by every session.
+     */
+    function store() : carbon::Store<fixtures::Draft, int64, fixtures::DraftTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<fixtures::Draft, int64, fixtures::DraftTable>();
+    }
+}
+
+/**
  * The columns of `notes` and how `Note` maps onto them.
  */
-public class NoteTable : hydrahon::Source, carbon::Schema<fixtures::Note, int64, fixtures::NoteRepository>
+public class NoteTable : hydrahon::Source, carbon::Schema<fixtures::Note, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('notes', 'id');
     public static hydrahon::Term<string> $title = carbon::select::column<string>('notes', 'title');
@@ -252,7 +509,7 @@ public class NoteTable : hydrahon::Source, carbon::Schema<fixtures::Note, int64,
         $m->id = $key;
     }
 
-    public const function link(fixtures::Note& $m) : carbon::Link<fixtures::NoteRepository>&
+    public const function link(fixtures::Note& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -323,18 +580,18 @@ public class NoteTableAlias : hydrahon::Source
 /**
  * What a query for `Note` models gathers: the field a query struct keeps.
  */
-public type NoteRows = carbon::Rows<fixtures::Note, int64, fixtures::NoteTable, fixtures::NoteRepository>;
+public type NoteRows = carbon::Rows<fixtures::Note, int64, fixtures::NoteTable>;
 
 /**
  * The `tags` of a batch of `Note` models, loaded with one query.
  */
 public class NoteTagsRelation : carbon::Eager<fixtures::Note>
 {
-    internal carbon::relation::Fetch<fixtures::Tag, fixtures::TagQuery> $fetch;
+    internal carbon::relation::Fetch<fixtures::Tag, fixtures::TagQuery, fixtures::TagRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<fixtures::Tag, fixtures::TagQuery>();
+        $this->fetch = carbon::relation::Fetch<fixtures::Tag, fixtures::TagQuery, fixtures::TagRepository>('fixtures::TagRepository');
     }
 
     /**
@@ -370,7 +627,7 @@ public class NoteTagsRelation : carbon::Eager<fixtures::Note>
         return $this;
     }
 
-    public function load(array<fixtures::Note>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<fixtures::Note>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
@@ -378,13 +635,17 @@ public class NoteTagsRelation : carbon::Eager<fixtures::Note>
         }
         array<fixtures::Tag> $found = [];
         if (!$keys->empty()) {
-            fixtures::TagQuery $q = $this->fetch->query($db, fixtures::TagTable::$noteId in $keys->list());
+            fixtures::TagQuery $q = guard $this->fetch->query($session, fixtures::TagTable::$noteId in $keys->list(), $seen) else ($e) { return .error($e); }
             array<fixtures::Tag> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, fixtures::Tag> $by = carbon::relation::Index<int64, fixtures::Tag>();
         foreach ($found as const &$f) {
+            fixtures::Tag? $had = $seen->find<int64, fixtures::Tag>($f->id);
             $by->add($f->noteId, $f);
+            if ($had == null) {
+                $seen->add<int64, fixtures::Tag>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
             $m->tags->set($by->all($m->id));
@@ -427,9 +688,9 @@ public struct NoteLoad : NoteRelations<NoteLoad>
 {
     internal carbon::Fill<fixtures::Note> $fill;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->fill = carbon::Fill<fixtures::Note>($db);
+        $this->fill = carbon::Fill<fixtures::Note>($session);
     }
 
     /**
@@ -448,29 +709,52 @@ public struct NoteLoad : NoteRelations<NoteLoad>
      */
     public function into(array<fixtures::Note>& $models) : status<carbon::Error>
     {
-        return $this->fill->into($models);
+        // the models in hand are the load's first: relations back to them share them
+        carbon::Loaded $seen = carbon::Loaded();
+        foreach ($models as const &$m) {
+            $seen->add<int64, fixtures::Note>($m->id, $m);
+        }
+        return $this->fill->into($models, $seen);
     }
 }
 
 /**
- * `load()` for the repository of `Note` models. A repository written by hand names it:
- * `NoteRepository : carbon::Repository<Note, …>, NoteLoading`.
+ * What a repository of `Note` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `NoteRepository : carbon::Repository<Note, …>, NoteWiring`.
  */
-public interface NoteLoading
+public interface NoteWiring
 {
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Note` models, shared by every session.
+     */
+    function store() : carbon::Store<fixtures::Note, int64, fixtures::NoteTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<fixtures::Note, int64, fixtures::NoteTable>();
+    }
+
     /**
      * Start filling the relations of models already in hand.
      */
     function load() : NoteLoad
     {
-        return NoteLoad($this->connection());
+        return NoteLoad($this->session());
     }
 }
 
 /**
  * The columns of `profiles` and how `Profile` maps onto them.
  */
-public class ProfileTable : hydrahon::Source, carbon::Schema<fixtures::Profile, int64, fixtures::ProfileRepository>
+public class ProfileTable : hydrahon::Source, carbon::Schema<fixtures::Profile, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('profiles', 'id');
     public static hydrahon::Term<string> $data = carbon::select::column<string>('profiles', 'data');
@@ -641,7 +925,7 @@ public class ProfileTable : hydrahon::Source, carbon::Schema<fixtures::Profile, 
         $m->id = $key;
     }
 
-    public const function link(fixtures::Profile& $m) : carbon::Link<fixtures::ProfileRepository>&
+    public const function link(fixtures::Profile& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -705,7 +989,7 @@ public class ProfileTableAlias : hydrahon::Source
 /**
  * What a query for `Profile` models gathers: the field a query struct keeps.
  */
-public type ProfileRows = carbon::Rows<fixtures::Profile, int64, fixtures::ProfileTable, fixtures::ProfileRepository>;
+public type ProfileRows = carbon::Rows<fixtures::Profile, int64, fixtures::ProfileTable>;
 
 /**
  * A query for `Profile` models. Declare a struct conforming to
@@ -715,9 +999,9 @@ public struct ProfileQuery : carbon::Query<fixtures::Profile, ProfileQuery>
 {
     internal ProfileRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = ProfileRows($db);
+        $this->rows = ProfileRows($session);
     }
 
     public function rows() : ProfileRows&
@@ -728,14 +1012,42 @@ public struct ProfileQuery : carbon::Query<fixtures::Profile, ProfileQuery>
 
 /**
  * The repository of `Profile` models: writes and queries, nothing of its own. Declare a
- * class conforming to `carbon::Repository<Profile, …>` in its place for finders and hooks.
+ * struct conforming to `carbon::Repository<Profile, …>` in its place for finders and hooks.
  */
-public type ProfileRepository = carbon::Records<fixtures::Profile, fixtures::ProfileQuery, int64>;
+public struct ProfileRepository : carbon::Repository<fixtures::Profile, fixtures::ProfileQuery, int64>, ProfileWiring
+{
+    public carbon::Session $session;
+}
+
+/**
+ * What a repository of `Profile` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `ProfileRepository : carbon::Repository<Profile, …>, ProfileWiring`.
+ */
+public interface ProfileWiring
+{
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Profile` models, shared by every session.
+     */
+    function store() : carbon::Store<fixtures::Profile, int64, fixtures::ProfileTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<fixtures::Profile, int64, fixtures::ProfileTable>();
+    }
+}
 
 /**
  * The columns of `tags` and how `Tag` maps onto them.
  */
-public class TagTable : hydrahon::Source, carbon::Schema<fixtures::Tag, int64, fixtures::TagRepository>
+public class TagTable : hydrahon::Source, carbon::Schema<fixtures::Tag, int64>
 {
     public static hydrahon::Term<int64> $id = carbon::select::column<int64>('tags', 'id');
     public static hydrahon::Term<int64> $noteId = carbon::select::column<int64>('tags', 'note_id');
@@ -844,7 +1156,7 @@ public class TagTable : hydrahon::Source, carbon::Schema<fixtures::Tag, int64, f
         $m->id = $key;
     }
 
-    public const function link(fixtures::Tag& $m) : carbon::Link<fixtures::TagRepository>&
+    public const function link(fixtures::Tag& $m) : carbon::Link&
     {
         return $m->link;
     }
@@ -900,7 +1212,7 @@ public class TagTableAlias : hydrahon::Source
 /**
  * What a query for `Tag` models gathers: the field a query struct keeps.
  */
-public type TagRows = carbon::Rows<fixtures::Tag, int64, fixtures::TagTable, fixtures::TagRepository>;
+public type TagRows = carbon::Rows<fixtures::Tag, int64, fixtures::TagTable>;
 
 /**
  * A query for `Tag` models. Declare a struct conforming to
@@ -910,9 +1222,9 @@ public struct TagQuery : carbon::Query<fixtures::Tag, TagQuery>, TagRelations<Ta
 {
     internal TagRows $rows;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->rows = TagRows($db);
+        $this->rows = TagRows($session);
     }
 
     public function rows() : TagRows&
@@ -923,16 +1235,11 @@ public struct TagQuery : carbon::Query<fixtures::Tag, TagQuery>, TagRelations<Ta
 
 /**
  * The repository of `Tag` models: writes and queries, nothing of its own. Declare a
- * class conforming to `carbon::Repository<Tag, …>` in its place for finders and hooks.
+ * struct conforming to `carbon::Repository<Tag, …>` in its place for finders and hooks.
  */
-public class TagRepository : carbon::Repository<fixtures::Tag, fixtures::TagQuery, int64>, TagLoading
+public struct TagRepository : carbon::Repository<fixtures::Tag, fixtures::TagQuery, int64>, TagWiring
 {
-    public carbon::Connection $db;
-
-    public function query() : fixtures::TagQuery
-    {
-        return fixtures::TagQuery($this->db);
-    }
+    public carbon::Session $session;
 }
 
 /**
@@ -940,11 +1247,11 @@ public class TagRepository : carbon::Repository<fixtures::Tag, fixtures::TagQuer
  */
 public class TagNoteRelation : carbon::Eager<fixtures::Tag>
 {
-    internal carbon::relation::Fetch<fixtures::Note, fixtures::NoteQuery> $fetch;
+    internal carbon::relation::Fetch<fixtures::Note, fixtures::NoteQuery, fixtures::NoteRepository> $fetch;
 
     public constructor()
     {
-        $this->fetch = carbon::relation::Fetch<fixtures::Note, fixtures::NoteQuery>();
+        $this->fetch = carbon::relation::Fetch<fixtures::Note, fixtures::NoteQuery, fixtures::NoteRepository>('fixtures::NoteRepository');
     }
 
     /**
@@ -980,24 +1287,50 @@ public class TagNoteRelation : carbon::Eager<fixtures::Tag>
         return $this;
     }
 
-    public function load(array<fixtures::Tag>& $models, carbon::Connection $db) : status<carbon::Error>
+    public function load(array<fixtures::Tag>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
     {
+        bool $reuse = $this->fetch->plain();
         carbon::relation::Keys<int64> $keys = carbon::relation::Keys<int64>();
         foreach ($models as const &$m) {
-            $keys->add($m->noteId);
+            fixtures::Note? $held = null;
+            if ($reuse) {
+                $held = $seen->find<int64, fixtures::Note>($m->noteId);
+            }
+            if ($held == null) {
+                $keys->add($m->noteId);
+            }
         }
         array<fixtures::Note> $found = [];
         if (!$keys->empty()) {
-            fixtures::NoteQuery $q = $this->fetch->query($db, fixtures::NoteTable::$id in $keys->list());
+            fixtures::NoteQuery $q = guard $this->fetch->query($session, fixtures::NoteTable::$id in $keys->list(), $seen) else ($e) { return .error($e); }
             array<fixtures::Note> $rows = guard $q->get() else ($e) { return .error($e); }
             $found = mv $rows;
         }
         carbon::relation::Index<int64, fixtures::Note> $by = carbon::relation::Index<int64, fixtures::Note>();
         foreach ($found as const &$f) {
+            fixtures::Note? $had = $seen->find<int64, fixtures::Note>($f->id);
             $by->add($f->id, $f);
+            if ($had == null) {
+                $seen->add<int64, fixtures::Note>($f->id, $f);
+            }
         }
         foreach ($models as &$m) {
-            $m->note->set($by->first($m->noteId));
+            int64 $k = $m->noteId;
+            fixtures::Note? $fresh = $by->first($k);
+            if ($fresh != null) {
+                $m->note->set($fresh);
+                continue;
+            }
+            fixtures::Note? $shared = null;
+            if ($reuse) {
+                $shared = $seen->find<int64, fixtures::Note>($k);
+            }
+            if ($shared != null) {
+                fixtures::Note $s = guard $shared;
+                $m->note->share($s);
+            } else {
+                $m->note->set(null);
+            }
         }
         return .ok();
     }
@@ -1037,9 +1370,9 @@ public struct TagLoad : TagRelations<TagLoad>
 {
     internal carbon::Fill<fixtures::Tag> $fill;
 
-    public constructor(carbon::Connection $db)
+    public constructor(carbon::Session $session)
     {
-        $this->fill = carbon::Fill<fixtures::Tag>($db);
+        $this->fill = carbon::Fill<fixtures::Tag>($session);
     }
 
     /**
@@ -1058,22 +1391,45 @@ public struct TagLoad : TagRelations<TagLoad>
      */
     public function into(array<fixtures::Tag>& $models) : status<carbon::Error>
     {
-        return $this->fill->into($models);
+        // the models in hand are the load's first: relations back to them share them
+        carbon::Loaded $seen = carbon::Loaded();
+        foreach ($models as const &$m) {
+            $seen->add<int64, fixtures::Tag>($m->id, $m);
+        }
+        return $this->fill->into($models, $seen);
     }
 }
 
 /**
- * `load()` for the repository of `Tag` models. A repository written by hand names it:
- * `TagRepository : carbon::Repository<Tag, …>, TagLoading`.
+ * What a repository of `Tag` models reaches through carbon: its session and the model's
+ * store. A repository written by hand names it and keeps its session in `$session`:
+ * `TagRepository : carbon::Repository<Tag, …>, TagWiring`.
  */
-public interface TagLoading
+public interface TagWiring
 {
+    /**
+     * The session the repository was built for.
+     */
+    function session() : carbon::Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The store of `Tag` models, shared by every session.
+     */
+    function store() : carbon::Store<fixtures::Tag, int64, fixtures::TagTable>
+    {
+        carbon::Session $s = $this->session();
+        return $s->store<fixtures::Tag, int64, fixtures::TagTable>();
+    }
+
     /**
      * Start filling the relations of models already in hand.
      */
     function load() : TagLoad
     {
-        return TagLoad($this->connection());
+        return TagLoad($this->session());
     }
 }
 
@@ -1141,4 +1497,49 @@ operator (hydrahon::Values& $into)[const MoodColumn& $column] = (fixtures::Mood 
 {
     int64 $raw = $case->value() as int64;
     $into[$column->term] = $raw;
+}
+
+/**
+ * The wiring of the models of this namespace, registered and checked in one go.
+ */
+public struct Carbon
+{
+    /**
+     * Register the repositories carbongen wrote for these models; the ones the module declares
+     * are registered by the app, with what they need.
+     */
+    public static function register(carbon::Db $db) : status<carbon::Error>
+    {
+        guard $db->register<fixtures::DraftRepository>() else ($e) { return .error($e); }
+        guard $db->register<fixtures::ProfileRepository>() else ($e) { return .error($e); }
+        guard $db->register<fixtures::TagRepository>() else ($e) { return .error($e); }
+        return .ok();
+    }
+
+    /**
+     * Whether every repository these models need is registered on `$db`: their own, and the
+     * ones their relations load through. Run it once after registering, so a repository left
+     * out stops the app at startup, not on the first request that reaches it. It also makes
+     * the store of every model, so none is made while requests run.
+     */
+    public static function check(carbon::Db $db) : status<carbon::Error>
+    {
+        if (!$db->has<fixtures::DraftRepository>()) {
+            return .error(.unregistered('fixtures::DraftRepository'));
+        }
+        if (!$db->has<fixtures::NoteRepository>()) {
+            return .error(.unregistered('fixtures::NoteRepository'));
+        }
+        if (!$db->has<fixtures::TagRepository>()) {
+            return .error(.unregistered('fixtures::TagRepository'));
+        }
+        if (!$db->has<fixtures::ProfileRepository>()) {
+            return .error(.unregistered('fixtures::ProfileRepository'));
+        }
+        $db->store<fixtures::Draft, int64, fixtures::DraftTable>();
+        $db->store<fixtures::Note, int64, fixtures::NoteTable>();
+        $db->store<fixtures::Profile, int64, fixtures::ProfileTable>();
+        $db->store<fixtures::Tag, int64, fixtures::TagTable>();
+        return .ok();
+    }
 }

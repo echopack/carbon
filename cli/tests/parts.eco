@@ -103,7 +103,7 @@ test model_names_its_generated_types
     assert($m->handle() == 'LineItemTable' && $m->qualifiedHandle() == 'app::models::LineItemTable');
     assert($m->aliasClass() == 'LineItemTableAlias' && $m->rowsAlias() == 'LineItemRows');
     assert($m->queryStruct() == 'LineItemQuery' && $m->repositoryAlias() == 'LineItemRepository');
-    assert($m->relationsInterface() == 'LineItemRelations' && $m->loadStruct() == 'LineItemLoad' && $m->loadingInterface() == 'LineItemLoading');
+    assert($m->relationsInterface() == 'LineItemRelations' && $m->loadStruct() == 'LineItemLoad' && $m->wiringInterface() == 'LineItemWiring');
     Relation $r = Relation('order', Direction::belongsTo, 'app::Order', 'orderId');
     assert($m->relationClass($r) == 'LineItemOrderRelation' && $m->relationMethod($r) == 'withOrder');
     assert($m->schemaLiteral() == 'null');

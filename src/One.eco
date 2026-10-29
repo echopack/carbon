@@ -3,15 +3,23 @@ namespace carbon;
 /**
  * A slot for one related model (belongs to, has one). A loader fills it; reading it never runs
  * a query, so an unloaded slot is simply empty.
+ *
+ * A model the load read for this slot is held strongly. One the load already held, the post
+ * a comment was loaded from, is shared: held weakly, so the two never keep each other alive.
+ * A shared slot reads null once the model it shares is gone.
  */
-public struct One<T>
+public struct One<T : class>
 {
     internal T? $item;
+    internal weak<T> $shared;
+    internal bool $weakly;
     internal bool $loaded;
 
     public constructor()
     {
         $this->item = null;
+        $this->shared = null;
+        $this->weakly = false;
         $this->loaded = false;
     }
 
@@ -21,10 +29,14 @@ public struct One<T>
     }
 
     /**
-     * The related model, null when there is none or the slot was never loaded.
+     * The related model, null when there is none, the slot was never loaded, or the model it
+     * shares is gone.
      */
     public const function get() : T?
     {
+        if ($this->weakly) {
+            return strong($this->shared);
+        }
         return $this->item;
     }
 
@@ -33,9 +45,30 @@ public struct One<T>
         return $this->loaded;
     }
 
+    /**
+     * Whether the slot shares a model held elsewhere rather than holding its own.
+     */
+    public const function shares() : bool
+    {
+        return $this->weakly;
+    }
+
     public function set(T? $item) : void
     {
         $this->item = $item;
+        $this->shared = null;
+        $this->weakly = false;
+        $this->loaded = true;
+    }
+
+    /**
+     * Fill the slot with `$item`, held elsewhere: kept weakly.
+     */
+    public function share(T& $item) : void
+    {
+        $this->item = null;
+        $this->shared = &$item;
+        $this->weakly = true;
         $this->loaded = true;
     }
 }
