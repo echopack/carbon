@@ -1,0 +1,41 @@
+namespace carbon;
+
+/**
+ * One change to the database's schema, run once by a `Migrator`. A class marked
+ * `#[carbon::migration: '20261029120000_create_users']`; carbongen lists every one in the
+ * namespace's `Carbon::migrations()`, ordered by that id.
+ *
+ * ```echo
+ * #[carbon::migration: '20261029120000_create_users']
+ * public class CreateUsers : carbon::Migration
+ * {
+ *     public function up(carbon::Migrating $m) : status<carbon::Error>
+ *     {
+ *         return $m->create(carbon::ddl::Table('users')->id()->string('email', 190, $unique: true)->timestamps());
+ *     }
+ *
+ *     public function down(carbon::Migrating $m) : status<carbon::Error>
+ *     {
+ *         return $m->drop('users');
+ *     }
+ * }
+ * ```
+ *
+ * `down` is optional. A migration without one cannot be rolled back, and a `Migrator` refuses
+ * to roll back a batch holding one before it runs anything.
+ */
+public interface Migration
+{
+    /**
+     * Make the change.
+     */
+    function up(Migrating $m) : status<Error>;
+
+    /**
+     * Undo what `up` did.
+     */
+    function down(Migrating $m) : status<Error>
+    {
+        return .error(.invalid('this migration has no down()'));
+    }
+}

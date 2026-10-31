@@ -1,7 +1,7 @@
 use carbon::{One, Many};
-use carbon::relation::{Keys, Index};
+use carbon::relation::{Keys, Index, Loader};
 use hydrahon::Value;
-use fixtures::{World, Note, Tag, TagQuery, NoteQuery, NoteLoad, NoteRepository, NoteTagsRelation, TagNoteRelation, TagTable, noteRow, tagRow, selectNotes, selectTags, message};
+use fixtures::{World, Note, Tag, TagQuery, NoteQuery, NoteLoad, NoteRepository, TagRepository, NoteTagsRelation, TagNoteRelation, NoteTable, TagTable, noteRow, tagRow, selectNotes, selectTags, message};
 
 test slots_start_unloaded
 {
@@ -272,12 +272,138 @@ test a_relation_to_a_model_without_a_registered_repository_is_an_error
 {
     carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
     $fake->rows([tagRow(10, 1, 'x')]);
-    carbon::Db $db = carbon::Db($fake);
+    carbon::DB $db = carbon::DB($fake);
     guard $db->register<NoteRepository>();
     array<Note> $list = [Note($id: 1, $title: 'a')];
     NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
     status<carbon::Error> $s = $notes->load()->withTags()->into($list);
-    assert(fixtures::message($s) == 'fixtures::TagRepository is not registered on the Db');
+    assert(fixtures::message($s) == 'fixtures::TagRepository is not registered on the DB');
     // refused before the query ran
     assert($fake->count() == 0);
+}
+
+/**
+ * What a loader built by hand filled each slot with, in order.
+ */
+internal class Filled
+{
+    public array<string> $heard = [];
+
+    public function said() : string
+    {
+        return str::join($this->heard, ' | ');
+    }
+}
+
+/**
+ * A has one loader from notes to a tag of theirs, filling `$filled` instead of a slot. A tag
+ * named `loose` holds no note.
+ */
+internal function firstTag(Filled $filled) : Loader<Note, Tag, int64, int64, TagQuery, TagRepository>
+{
+    return Loader<Note, Tag, int64, int64, TagQuery, TagRepository>(
+        hasOne: 'fixtures::TagRepository',
+        function(Note $m) : int64? { return $m->id; },
+        function(Tag $t) : int64? {
+            if ($t->name == 'loose') {
+                return null;
+            }
+            return $t->noteId;
+        },
+        function(Tag $t) : int64 { return $t->id; },
+        function(array<int64> $keys) : hydrahon::Term<bool> { return TagTable::$noteId in $keys; },
+        function[$filled](Note $m, Tag? $found) : void {
+            if ($found == null) {
+                $filled->heard[] = "set {$m->id}:none";
+                return;
+            }
+            Tag $t = guard $found;
+            $filled->heard[] = "set {$m->id}:{$t->id}";
+        },
+        function[$filled](Note $m, Tag $held) : void {
+            $filled->heard[] = "share {$m->id}:{$held->id}";
+        }
+    );
+}
+
+/**
+ * A belongs to loader from tags to their note, filling `$filled`. A tag named `orphan` holds no
+ * note.
+ */
+internal function parentNote(Filled $filled) : Loader<Tag, Note, int64, int64, NoteQuery, NoteRepository>
+{
+    return Loader<Tag, Note, int64, int64, NoteQuery, NoteRepository>(
+        belongsTo: 'fixtures::NoteRepository',
+        function(Tag $m) : int64? {
+            if ($m->name == 'orphan') {
+                return null;
+            }
+            return $m->noteId;
+        },
+        function(Note $t) : int64? { return $t->id; },
+        function(Note $t) : int64 { return $t->id; },
+        function(array<int64> $keys) : hydrahon::Term<bool> { return NoteTable::$id in $keys; },
+        function[$filled](Tag $m, Note? $found) : void {
+            if ($found == null) {
+                $filled->heard[] = "set {$m->id}:none";
+                return;
+            }
+            Note $n = guard $found;
+            $filled->heard[] = "set {$m->id}:{$n->id}";
+        },
+        function[$filled](Tag $m, Note $held) : void {
+            $filled->heard[] = "share {$m->id}:{$held->id}";
+        }
+    );
+}
+
+test has_one_takes_the_first_row_of_each_model
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a'), noteRow(2, 'b'), noteRow(3, 'c')]);
+    array<Note> $notes = guard $w->notes->all();
+    $w->fake->rows([tagRow(10, 1, 'x'), tagRow(11, 1, 'y'), tagRow(12, 3, 'loose')]);
+    Filled $filled = Filled();
+    guard firstTag($filled)->load($notes, $w->session, carbon::Loaded());
+    assert($w->fake->last() == selectTags(' WHERE `tags`.`note_id` IN (?, ?, ?)'));
+    // a row holding no note belongs to none of them
+    assert($filled->said() == 'set 1:10 | set 2:none | set 3:none');
+}
+
+test has_one_shares_a_model_the_load_holds_unless_narrowed
+{
+    $w = World();
+    $w->fake->rows([noteRow(1, 'a')]);
+    array<Note> $notes = guard $w->notes->all();
+    Tag $held = Tag($id: 10, $noteId: 1, $name: 'x');
+    carbon::Loaded $seen = carbon::Loaded();
+    $seen->add<int64, Tag>(10, $held);
+    $w->fake->rows([tagRow(10, 1, 'x')]);
+    Filled $filled = Filled();
+    guard firstTag($filled)->load($notes, $w->session, $seen);
+    assert($filled->said() == 'share 1:10');
+    // a narrowed relation keeps the copy it read: the one held had none of its conditions
+    $w->fake->rows([tagRow(10, 1, 'x')]);
+    Filled $narrowed = Filled();
+    $loader = firstTag($narrowed);
+    $loader->where(TagTable::$name == 'x');
+    guard $loader->load($notes, $w->session, $seen);
+    assert($narrowed->said() == 'set 1:10');
+}
+
+test a_model_without_a_key_asks_for_nothing
+{
+    $w = World();
+    array<Tag> $tags = [Tag($id: 1, $noteId: 5, $name: 'a'), Tag($id: 2, $noteId: 6, $name: 'orphan')];
+    $w->fake->rows([noteRow(5, 'five')]);
+    Filled $filled = Filled();
+    guard parentNote($filled)->load($tags, $w->session, carbon::Loaded());
+    assert($w->fake->last() == selectNotes(' WHERE `notes`.`id` IN (?) AND `notes`.`deleted_at` IS NULL'));
+    assert($filled->said() == 'set 1:5 | set 2:none');
+    // with no key among them, no query runs at all
+    array<Tag> $orphans = [Tag($id: 3, $noteId: 7, $name: 'orphan')];
+    Filled $none = Filled();
+    guard parentNote($none)->load($orphans, $w->session, carbon::Loaded());
+    assert($w->fake->count() == 1);
+    assert($none->said() == 'set 3:none');
 }

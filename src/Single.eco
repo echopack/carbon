@@ -1,0 +1,143 @@
+namespace carbon;
+
+/**
+ * A source of one connection, for scripts and tests: `DB($driver)` wraps its driver in one.
+ * Every session runs on that connection. While one session has a transaction open on it, the
+ * statements of every other session are refused with `.busy` rather than run inside it. The
+ * one connection serves one thread: a `DB` shared by threads takes a pooled source.
+ */
+#[atomic]
+public class Single : Source
+{
+    internal Line $line;
+
+    public constructor(Driver $driver)
+    {
+        $this->line = Line($driver);
+    }
+
+    /**
+     * A turn on the one connection, for one session.
+     */
+    public function open() : result<Driver, Error>
+    {
+        Driver $turn = Turn($this->line);
+        return .ok($turn);
+    }
+
+    public const function traits() : Traits
+    {
+        return $this->line->driver->traits();
+    }
+}
+
+/**
+ * The one connection of a `Single`, and which turn has a transaction open on it: 0 for none.
+ */
+internal class Line
+{
+    internal Driver $driver;
+    internal uint64 $turns = 0;
+    internal uint64 $holder = 0;
+
+    internal constructor(Driver $driver)
+    {
+        $this->driver = $driver;
+    }
+}
+
+/**
+ * One session's use of a `Single`'s connection.
+ */
+internal class Turn : Driver
+{
+    internal Line $line;
+    internal uint64 $ticket;
+
+    internal constructor(Line $line)
+    {
+        $line->turns = $line->turns + 1;
+        $this->line = $line;
+        $this->ticket = $line->turns;
+    }
+
+    /**
+     * A session dropped with its transaction still open lets go of the line: nothing it wrote
+     * is kept.
+     */
+    destructor()
+    {
+        if ($this->line->holder == $this->ticket) {
+            $this->line->holder = 0;
+            status<Error> $done = $this->line->driver->rollback();
+        }
+    }
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $this->line->driver->render($q);
+    }
+
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $this->line->driver->render($q);
+    }
+
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $this->line->driver->render($q);
+    }
+
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $this->line->driver->render($q);
+    }
+
+    public function query(const Statement& $s) : result<Cursor, Error>
+    {
+        guard $this->free() else ($e) { return .error($e); }
+        return $this->line->driver->query($s);
+    }
+
+    public function exec(const Statement& $s) : result<Written, Error>
+    {
+        guard $this->free() else ($e) { return .error($e); }
+        return $this->line->driver->exec($s);
+    }
+
+    public const function traits() : Traits
+    {
+        return $this->line->driver->traits();
+    }
+
+    public function begin() : status<Error>
+    {
+        guard $this->free() else ($e) { return .error($e); }
+        guard $this->line->driver->begin() else ($e) { return .error($e); }
+        $this->line->holder = $this->ticket;
+        return .ok();
+    }
+
+    public function commit() : status<Error>
+    {
+        $this->line->holder = 0;
+        return $this->line->driver->commit();
+    }
+
+    public function rollback() : status<Error>
+    {
+        $this->line->holder = 0;
+        return $this->line->driver->rollback();
+    }
+
+    /**
+     * Refuse to run while another turn has a transaction open: the statement would land in it.
+     */
+    internal const function free() : status<Error>
+    {
+        if ($this->line->holder != 0 && $this->line->holder != $this->ticket) {
+            return .error(.busy);
+        }
+        return .ok();
+    }
+}

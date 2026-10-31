@@ -144,6 +144,26 @@ test a_version_guards_and_advances_every_update
     assert(!$d->dirty());
 }
 
+test a_version_is_refused_on_a_driver_that_counts_changed_rows
+{
+    $w = World();
+    $w->fake->matched = false;
+    $w->fake->rows([draftRow(1, 'first', 3)]);
+    Draft $d = guard $w->drafts->find()->one(1);
+    $d->text = 'second';
+    status<Error> $s = $d->save();
+    assert(message($s)->starts('invalid: a model with a version needs a driver that counts matched rows'));
+    status<Error> $gone = $d->purge();
+    assert($gone->failed());
+    // refused before anything ran: only the SELECT reached the driver
+    assert($w->fake->count() == 1);
+    assert($d->revision == 3 && $d->dirty());
+    // a model that is not stored yet inserts as ever
+    $w->fake->written($insertId: 2);
+    Draft $fresh = guard $w->drafts->create(Draft($text: 'new'));
+    assert($fresh->id == 2);
+}
+
 test a_version_that_moved_on_is_stale
 {
     $w = World();

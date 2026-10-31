@@ -1,0 +1,23 @@
+namespace carbon;
+
+/**
+ * What every session of a `DB` shares: the source connections come from, the clock timestamps
+ * come from, the listeners that hear about every statement and the names of other databases.
+ * Each session's `Connection` runs on it.
+ */
+#[atomic]
+internal class Engine
+{
+    internal Source $source;
+    internal calendar::Clock $clock;
+    internal array<Listener> $listeners = [];
+    internal map<string, string> $schemas = [];
+    internal Seal $seal;
+
+    internal constructor(Source $source, calendar::Clock $clock, Seal $seal = Seal())
+    {
+        $this->source = $source;
+        $this->clock = $clock;
+        $this->seal = $seal;
+    }
+}

@@ -1,0 +1,20 @@
+namespace blog;
+
+#[carbon::migration: '20261029120200_create_comments']
+public class CreateComments : carbon::Migration
+{
+    public function up(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->create(carbon::ddl::Table('comments')
+            ->id()
+            ->bigint('post_id')
+            ->text('body')
+            ->datetime('created_at', $nullable: true)
+            ->foreign('post_id', 'posts'));
+    }
+
+    public function down(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->drop('comments');
+    }
+}

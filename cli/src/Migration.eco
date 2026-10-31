@@ -1,0 +1,55 @@
+namespace carbongen;
+
+/**
+ * One `#[carbon::migration]` class: its id, and whether it can be rolled back.
+ */
+public struct Migration : contract::comparable<Migration>
+{
+    public string $id;
+    public string $qualified;
+
+    /**
+     * Whether the class declares `down`.
+     */
+    public bool $reversible;
+
+    public const function space() : string
+    {
+        return Names::space($this->qualified);
+    }
+
+    /**
+     * Whether `$id` is a migration id: fourteen digits of when it was written
+     * (`20261029120000`), an underscore, and a name in lowercase letters, digits and
+     * underscores. Ids sort in the order they were written.
+     */
+    public static function valid(const string& $id) : bool
+    {
+        if ($id->size() < 16) {
+            return false;
+        }
+        usize $i = 0;
+        while ($i < $id->size()) {
+            uint8 $b = $id->byte($i);
+            bool $digit = Names::digit($b);
+            if ($i < 14) {
+                if (!$digit) {
+                    return false;
+                }
+            } else if ($i == 14) {
+                if ($b != 95) {
+                    return false;
+                }
+            } else if (!$digit && $b != 95 && !Names::lower($b)) {
+                return false;
+            }
+            $i = $i + 1;
+        }
+        return true;
+    }
+}
+
+operator (const Migration& $a) < (const Migration& $b) : bool
+{
+    return $a->id < $b->id;
+}

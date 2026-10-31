@@ -10,7 +10,7 @@ internal enum Control : uint8
     case rollback = 2;
 
     /**
-     * The statement as it was sent, for listeners and the fake.
+     * The statement as it was sent, for listeners.
      */
     internal const function statement() : Statement
     {

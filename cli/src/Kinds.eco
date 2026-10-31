@@ -55,6 +55,36 @@ public struct Kinds
     }
 
     /**
+     * The codec carbon brings for a time type, or empty when `$name` is none: an instant
+     * (`time::timestamp`) is a DATETIME in UTC, a `calendar::DateTime` a DATETIME as written
+     * and a `calendar::Date` a DATE.
+     */
+    public static function temporal(const string& $name) : string
+    {
+        if ($name == 'std::time::timestamp') {
+            return 'carbon::codec::Instant';
+        }
+        if ($name == 'calendar::DateTime') {
+            return 'carbon::codec::Wall';
+        }
+        if ($name == 'calendar::Date') {
+            return 'carbon::codec::Day';
+        }
+        return '';
+    }
+
+    /**
+     * The column type a time type from `temporal` is stored as.
+     */
+    public static function temporalBase(const string& $name) : string
+    {
+        if ($name == 'calendar::Date') {
+            return 'hydrahon::Date';
+        }
+        return 'hydrahon::DateTime';
+    }
+
+    /**
      * The stored type of a narrower number, or empty when `$name` is none.
      */
     public static function widened(const string& $name) : string

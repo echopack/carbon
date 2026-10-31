@@ -1,0 +1,83 @@
+namespace carbon::migrate;
+
+use carbon::{Connection, Cursor, Error, Problem};
+use carbon::ddl::{Grammar, Table};
+
+/**
+ * The table that records which migrations ran: one row per migration, with its batch and when
+ * it ran.
+ */
+internal struct Ledger
+{
+    internal string $name;
+    internal hydrahon::Term<string> $id;
+    internal hydrahon::Term<int64> $batch;
+    internal hydrahon::Term<hydrahon::DateTime> $at;
+
+    internal constructor(string $name)
+    {
+        $this->name = $name;
+        hydrahon::Table $t = hydrahon::Table(name: $name);
+        $this->id = $t->column<string>('id');
+        $this->batch = $t->column<int64>('batch');
+        $this->at = $t->column<hydrahon::DateTime>('ran_at');
+    }
+
+    /**
+     * The table, created only when it is missing.
+     */
+    internal const function table() : Table
+    {
+        return Table($this->name)
+            ->string('id', 190)
+            ->bigint('batch')
+            ->datetime('ran_at')
+            ->primary(['id'])
+            ->ifMissing();
+    }
+
+    /**
+     * Every row, in id order.
+     */
+    internal const function read(Connection& $db) : result<array<Applied>, Error>
+    {
+        hydrahon::Select $q = hydrahon::Select(from: hydrahon::Table(name: $this->name));
+        $q->fields([$this->id, $this->batch, $this->at]);
+        $q->order([$this->id->asc()]);
+        Cursor $rows = guard $db->query($q) else ($e) { return .error($e); }
+        array<Applied> $out = [];
+        while (true) {
+            bool $more = guard $rows->step() else ($e) { return .error($e); }
+            if (!$more) {
+                break;
+            }
+            string $id = guard $rows->text(0) else { return .error(.column('id', Problem::of($rows, 0))); }
+            int64 $batch = guard $rows->int(1) else { return .error(.column('batch', Problem::of($rows, 1))); }
+            hydrahon::DateTime $at = guard $rows->datetime(2) else { return .error(.column('ran_at', Problem::of($rows, 2))); }
+            $out[] = Applied($id, $batch, $at);
+        }
+        return .ok($out);
+    }
+
+    internal const function add(Connection& $db, const string& $id, int64 $batch, hydrahon::DateTime $at) : status<Error>
+    {
+        hydrahon::Values $row = hydrahon::Values();
+        string $key = $id;
+        $row[$this->id] = $key;
+        $row[$this->batch] = $batch;
+        $row[$this->at] = $at;
+        hydrahon::Insert $q = hydrahon::Insert(into: hydrahon::Table(name: $this->name));
+        $q->row(mv $row);
+        guard $db->exec($q) else ($e) { return .error($e); }
+        return .ok();
+    }
+
+    internal const function remove(Connection& $db, const string& $id) : status<Error>
+    {
+        hydrahon::Delete $q = hydrahon::Delete(from: hydrahon::Table(name: $this->name));
+        string $key = $id;
+        $q->where($this->id == $key);
+        guard $db->exec($q) else ($e) { return .error($e); }
+        return .ok();
+    }
+}

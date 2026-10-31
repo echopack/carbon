@@ -1,0 +1,74 @@
+namespace carbon::ddl;
+
+/**
+ * A table to create: its columns, its key, indexes and foreign keys. An immutable value whose
+ * methods hand back a changed copy, so they chain; `Columns` has the column helpers.
+ *
+ * ```echo
+ * carbon::ddl::Table('posts')
+ *     ->id()
+ *     ->bigint('author_id')
+ *     ->string('title')
+ *     ->softDeletes()
+ *     ->index(['author_id'])
+ *     ->foreign('author_id', 'users', $onDelete: .cascade);
+ * ```
+ */
+public struct Table : Columns<Table>
+{
+    public string $name;
+    public array<Column> $columns = [];
+
+    /**
+     * A key of several columns. A key of one is `Column::primary`, which `id()` sets.
+     */
+    public array<string> $primary = [];
+    public array<Index> $indexes = [];
+    public array<Foreign> $foreigns = [];
+
+    /**
+     * Create the table only when it does not exist yet.
+     */
+    public bool $missing = false;
+
+    public function add(Column $column) : Table
+    {
+        Table $copy = $this;
+        $copy->columns[] = mv $column;
+        return $copy;
+    }
+
+    /**
+     * Make `$columns` together the table's key.
+     */
+    public const function primary(array<string> $columns) : Table
+    {
+        Table $copy = $this;
+        $copy->primary = $columns;
+        return $copy;
+    }
+
+    public function add(Index $index) : Table
+    {
+        Table $copy = $this;
+        $copy->indexes[] = mv $index;
+        return $copy;
+    }
+
+    public function add(Foreign $foreign) : Table
+    {
+        Table $copy = $this;
+        $copy->foreigns[] = mv $foreign;
+        return $copy;
+    }
+
+    /**
+     * The same table, created only when it does not exist yet.
+     */
+    public const function ifMissing() : Table
+    {
+        Table $copy = $this;
+        $copy->missing = true;
+        return $copy;
+    }
+}

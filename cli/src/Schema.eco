@@ -8,6 +8,11 @@ namespace carbongen;
 public class Schema
 {
     public array<Model> $models = [];
+
+    /**
+     * The `#[carbon::migration]` classes, in the order they were declared.
+     */
+    public array<Migration> $migrations = [];
     public array<string> $problems = [];
     // every declaration by qualified name, to look up enums, codecs, clashes and the models
     // relations point to, known before any is read so relations can point forward
@@ -78,6 +83,10 @@ public class Schema
         string $kind = Json::text($d, 'kind');
         string $q = Json::text($d, 'qualified');
         string $at = Schema::where($d, Json::int($d, 'line'));
+        if (Json::has($d, 'migration')) {
+            $this->migration($d, $kind, $q, $at);
+            return;
+        }
         if (Json::has($d, 'table')) {
             $this->bare($d, $kind, $q, $at);
             return;
@@ -244,14 +253,7 @@ public class Schema
         }
         $this->query($model);
         $model->repositoryDeclared = $this->declared->has($model->repository);
-        array<string> $generated = [$model->qualifiedHandle(), $model->qualify($model->aliasClass()), $model->qualify($model->rowsAlias()), $model->qualify($model->wiringInterface()), $model->qualify('Carbon')];
-        if (!$model->queryDeclared) {
-            $generated[] = $model->query;
-        }
-        if ($model->relations->count() > 0) {
-            $generated[] = $model->qualify($model->relationsInterface());
-            $generated[] = $model->qualify($model->loadStruct());
-        }
+        array<string> $generated = $model->generated();
         if (!$model->repositoryDeclared && $model->repository->size() > 0) {
             if (Names::space($model->repository) != $model->space()) {
                 $this->problem("{$at}: {$q}: {$model->repository} is not declared; declare it, or name one in {$model->space()} for carbongen to write");
@@ -347,6 +349,92 @@ public class Schema
         }
         $this->problem("{$at}: {$q}: #[carbon::columns] is snake (the default) or exact");
         return true;
+    }
+
+    /**
+     * Read a `#[carbon::migration]`: a class conforming to `carbon::Migration` that carbon
+     * builds with no arguments, under an id no other migration of the module has.
+     */
+    private function migration(const json::Value& $d, const string& $kind, const string& $q, const string& $at) : void
+    {
+        if (Json::has($d, 'model') || Json::has($d, 'table')) {
+            $this->problem("{$at}: {$q}: a migration is no model or table; keep #[carbon::migration] on a class of its own");
+            return;
+        }
+        if ($kind != 'class') {
+            $this->problem("{$at}: {$q}: #[carbon::migration] belongs on a class: carbon keeps migrations as carbon::Migration values, and only a class can be one");
+            return;
+        }
+        $this->known($d, ['migration'], $at, $q);
+        string $id = Json::tool($d, 'migration');
+        if (!Migration::valid($id)) {
+            $this->problem("{$at}: {$q}: #[carbon::migration] needs an id of when it was written and a name: #[carbon::migration: '20261029120000_create_users']");
+            return;
+        }
+        if (Json::items($d, 'generics')->count() > 0) {
+            $this->problem("{$at}: {$q}: a migration cannot be generic");
+            return;
+        }
+        bool $conforms = false;
+        foreach (Json::items($d, 'conforms') as const &$c) {
+            if (Json::text($c, 'name') == 'carbon::Migration') {
+                $conforms = true;
+            }
+        }
+        if (!$conforms) {
+            $this->problem("{$at}: {$q}: a migration conforms to carbon::Migration");
+            return;
+        }
+        if (Json::items($d, 'constructors')->count() > 0) {
+            $this->problem("{$at}: {$q}: a migration keeps the implicit constructor, carbon builds it with no arguments");
+            return;
+        }
+        foreach (Json::items($d, 'fields') as const &$f) {
+            if (Json::flag($f, 'static')) {
+                continue;
+            }
+            string $fat = Schema::where($d, Json::int($f, 'line'));
+            string $field = Json::text($f, 'name');
+            if (Json::tools($f)->count() > 0) {
+                $this->problem("{$fat}: {$q}::${$field}: field attributes need #[carbon::model] on the type");
+            }
+            if (!Json::flag($f, 'default')) {
+                $this->problem("{$fat}: {$q}::${$field}: a migration's fields need a default, carbon builds it with no arguments");
+            }
+        }
+        foreach ($this->migrations as const &$other) {
+            if ($other->id == $id) {
+                $this->problem("{$at}: {$q}: {$other->qualified} has the id {$id} already");
+                return;
+            }
+        }
+        string $wiring = Names::qualify(Names::space($q), 'Carbon');
+        if ($this->declared->has($wiring)) {
+            $this->problem("{$at}: {$q}: the generated {$wiring} would clash with the declaration of that name");
+            return;
+        }
+        bool $reversible = false;
+        foreach (Json::items($d, 'methods') as const &$m) {
+            if (Json::text($m, 'name') == 'down') {
+                $reversible = true;
+            }
+        }
+        $this->migrations[] = Migration($id, $q, $reversible);
+    }
+
+    /**
+     * The migrations of namespace `$space`, in id order.
+     */
+    public const function migrations(const string& $space) : array<Migration>
+    {
+        array<Migration> $out = [];
+        foreach ($this->migrations as const &$m) {
+            if ($m->space() == $space) {
+                $out[] = $m;
+            }
+        }
+        $out->sort();
+        return $out;
     }
 
     /**
@@ -537,6 +625,10 @@ public class Schema
             }
             return Column($field, $name, $innerText, $nullable, $raw, .codec, $via, '');
         }
+        string $time = Kinds::temporal($innerText);
+        if ($time->size() > 0) {
+            return Column($field, $name, $innerText, $nullable, Kinds::temporalBase($innerText), .codec, $time, '');
+        }
         if (Kinds::plain($innerText)) {
             return Column($field, $name, $innerText, $nullable, $innerText, .plain, '', '');
         }
@@ -612,24 +704,25 @@ public class Schema
      */
     private function stamps(const json::Value& $f, const Column& $c, const string& $at, const string& $what, Model& $model) : void
     {
-        bool $time = $c->shape == Shape::plain && $c->base == 'hydrahon::DateTime';
+        bool $time = $c->stampable();
+        string $kinds = 'time::timestamp, calendar::DateTime or hydrahon::DateTime';
         if (Json::has($f, 'created')) {
             if (!$time) {
-                $this->problem("{$at}: {$what}: #[carbon::created] goes on a hydrahon::DateTime field");
+                $this->problem("{$at}: {$what}: #[carbon::created] goes on a {$kinds} field");
             }
             $this->settable('created', $c, $at, $what);
             $model->created[] = $c->property;
         }
         if (Json::has($f, 'updated')) {
             if (!$time) {
-                $this->problem("{$at}: {$what}: #[carbon::updated] goes on a hydrahon::DateTime field");
+                $this->problem("{$at}: {$what}: #[carbon::updated] goes on a {$kinds} field");
             }
             $this->settable('updated', $c, $at, $what);
             $model->updated[] = $c->property;
         }
         if (Json::has($f, 'deleted')) {
             if (!$time || !$c->nullable) {
-                $this->problem("{$at}: {$what}: #[carbon::deleted] goes on a hydrahon::DateTime? field");
+                $this->problem("{$at}: {$what}: #[carbon::deleted] goes on a nullable {$kinds} field");
             }
             $this->settable('deleted', $c, $at, $what);
             if (Json::has($f, 'created') || Json::has($f, 'updated')) {

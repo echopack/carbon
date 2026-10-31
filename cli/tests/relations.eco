@@ -18,36 +18,30 @@ internal function tree() : string
 test a_has_many_through_a_nullable_key
 {
     string $out = emitted(tree());
-    // the children are picked by their nullable key, and only the ones that have it are indexed
+    // the children are picked by their nullable key; the loader skips the ones without it
     assert($out->contains("public class NoteRepliesRelation : carbon::Eager<app::Note>"));
-    assert($out->contains('            app::NoteQuery $q = guard $this->fetch->query($session, app::NoteTable::$parentId in $keys->list(), $seen) else ($e) { return .error($e); }'));
-    assert($out->contains("            if ($f->parentId != null) \{\n                int64 $k = guard $f->parentId;\n                $by->add($k, $f);\n                if ($had == null) \{\n                    $seen->add<int64, app::Note>($f->id, $f);"));
+    assert($out->contains("            hasMany: 'app::NoteRepository',\n            function(app::Note $m) : int64? \{ return $m->id; },\n            function(app::Note $t) : int64? \{ return $t->parentId; },"));
+    assert($out->contains('            function(array<int64> $keys) : hydrahon::Term<bool> { return app::NoteTable::$parentId in mv $keys; },'));
     // many keeps its own copies, held strongly
-    assert($out->contains('            $m->replies->set($by->all($m->id));'));
+    assert($out->contains('            function(app::Note $m, array<app::Note> $found) : void { $m->replies->set(mv $found); }'));
 }
 
 test a_belongs_to_through_a_nullable_key
 {
     string $out = emitted(tree());
-    // a model without a parent adds no key, nor does one whose parent this load holds already
-    assert($out->contains("            if ($m->parentId != null) \{\n                int64 $k = guard $m->parentId;\n                app::Note? $held = null;\n                if ($reuse) \{\n                    $held = $seen->find<int64, app::Note>($k);\n                }\n                if ($held == null) \{\n                    $keys->add($k);\n                }\n            }"));
-    assert($out->contains("            if ($m->parentId == null) \{\n                $m->parent->set(null);\n                continue;\n            }"));
-    // the parent is indexed by its own key, which is never null
-    assert($out->contains("            $by->add($f->id, $f);\n            if ($had == null) \{\n                $seen->add<int64, app::Note>($f->id, $f);"));
+    // a model without a parent hands the loader no key; the parent is matched by its own key
+    assert($out->contains("            belongsTo: 'app::NoteRepository',\n            function(app::Note $m) : int64? \{ return $m->parentId; },\n            function(app::Note $t) : int64? \{ return $t->id; },"));
+    assert($out->contains('            function(app::Note $m, app::Note? $found) : void { $m->parent->set($found); },'));
 }
 
 test a_model_the_load_holds_is_shared_not_read_again
 {
     string $out = emitted(tree());
-    // only a relation nothing narrows reuses
-    assert($out->contains('        bool $reuse = $this->fetch->plain();'));
     // read now: held; held by the load already: shared, weakly
-    assert($out->contains("            app::Note? $fresh = $by->first($k);\n            if ($fresh != null) \{\n                $m->parent->set($fresh);\n                continue;\n            }\n            app::Note? $shared = null;\n            if ($reuse) \{\n                $shared = $seen->find<int64, app::Note>($k);\n            }"));
-    assert($out->contains("                $m->parent->share($s);"));
+    assert($out->contains('            function(app::Note $m, app::Note $held) : void { $m->parent->share($held); }'));
     // has one reads its row, and shares the copy the load already holds
-    assert($out->contains("                if ($reuse && $had != null) \{\n                    app::Note $h = guard $had;\n                    $known->add($k, $h);"));
-    assert($out->contains("            app::Note? $shared = $known->first($k);"));
-    assert($out->contains("                $m->pinned->share($s);"));
+    assert($out->contains("            hasOne: 'app::NoteRepository',"));
+    assert($out->contains('            function(app::Note $m, app::Note $held) : void { $m->pinned->share($held); }'));
     // load() starts with the models in hand
     assert($out->contains("        carbon::Loaded $seen = carbon::Loaded();\n        foreach ($models as const &$m) \{\n            $seen->add<int64, app::Note>($m->id, $m);\n        }\n        return $this->fill->into($models, $seen);"));
 }

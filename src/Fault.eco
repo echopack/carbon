@@ -36,4 +36,10 @@ public enum Fault : uint8
      * The connection is gone or never came up.
      */
     case connection = 5;
+
+    /**
+     * The source had no connection free before its deadline: every one is lent out. The work
+     * never reached the database, so it can be tried again later.
+     */
+    case exhausted = 6;
 }

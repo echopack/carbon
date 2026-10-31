@@ -1,0 +1,195 @@
+namespace carbon::ddl;
+
+/**
+ * The column helpers a `Table` and an `Alter` share: each adds one column and hands back the
+ * changed copy, so they chain.
+ *
+ * ```echo
+ * carbon::ddl::Table('users')
+ *     ->id()
+ *     ->string('email', 190, $unique: true)
+ *     ->bool('admin', $default: false)
+ *     ->timestamps();
+ * ```
+ *
+ * A conformer writes the three `add`s; every helper here is a default on top of them.
+ */
+public interface Columns<T>
+{
+    /**
+     * Add `$column`.
+     */
+    function add(Column $column) : T;
+
+    function add(Index $index) : T;
+
+    function add(Foreign $foreign) : T;
+
+    function index(array<string> $columns, string $name = '') : T
+    {
+        return $this->add(Index($columns, false, $name));
+    }
+
+    function unique(array<string> $columns, string $name = '') : T
+    {
+        return $this->add(Index($columns, true, $name));
+    }
+
+    /**
+     * `$column` refers to `$references` of `$table`.
+     */
+    function foreign(string $column, string $table, string $references = 'id', Action $onDelete = .restrict, Action $onUpdate = .restrict, string $name = '') : T
+    {
+        return $this->add(Foreign($column, $table, $references, $onDelete, $onUpdate, $name));
+    }
+
+    /**
+     * The key the database numbers: a `BIGINT` that counts up, the table's primary key. This is
+     * the `int64 $id` a model with a generated `#[carbon::key]` expects.
+     */
+    function id(const string& $name = 'id') : T
+    {
+        Column $c = Column($name, .bigint);
+        $c->increments = true;
+        $c->primary = true;
+        return $this->add($c);
+    }
+
+    function bigint(const string& $name, bool $nullable = false, int64? $default = null, bool $unsigned = false) : T
+    {
+        return $this->add(Column($name, .bigint, $nullable, given($default), $unsigned));
+    }
+
+    function int(const string& $name, bool $nullable = false, int64? $default = null, bool $unsigned = false) : T
+    {
+        return $this->add(Column($name, .int, $nullable, given($default), $unsigned));
+    }
+
+    function smallint(const string& $name, bool $nullable = false, int64? $default = null, bool $unsigned = false) : T
+    {
+        return $this->add(Column($name, .smallint, $nullable, given($default), $unsigned));
+    }
+
+    function tinyint(const string& $name, bool $nullable = false, int64? $default = null, bool $unsigned = false) : T
+    {
+        return $this->add(Column($name, .tinyint, $nullable, given($default), $unsigned));
+    }
+
+    function bool(const string& $name, bool $nullable = false, bool? $default = null) : T
+    {
+        return $this->add(Column($name, .bool, $nullable, given($default)));
+    }
+
+    /**
+     * Text of at most `$size` characters. `$unique` adds a unique index on the column alone.
+     */
+    function string(const string& $name, uint32 $size = 255, bool $nullable = false, string? $default = null, bool $unique = false) : T
+    {
+        Column $c = Column($name, .string($size), $nullable, given($default));
+        $c->unique = $unique;
+        return $this->add($c);
+    }
+
+    function text(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .text, $nullable));
+    }
+
+    function json(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .json, $nullable));
+    }
+
+    function decimal(const string& $name, uint8 $precision = 10, uint8 $scale = 2, bool $nullable = false, hydrahon::Decimal? $default = null) : T
+    {
+        return $this->add(Column($name, .decimal($precision, $scale), $nullable, given($default)));
+    }
+
+    function float(const string& $name, bool $nullable = false, float64? $default = null) : T
+    {
+        return $this->add(Column($name, .float, $nullable, given($default)));
+    }
+
+    function double(const string& $name, bool $nullable = false, float64? $default = null) : T
+    {
+        return $this->add(Column($name, .double, $nullable, given($default)));
+    }
+
+    function date(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .date, $nullable));
+    }
+
+    function datetime(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .datetime, $nullable));
+    }
+
+    function time(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .time, $nullable));
+    }
+
+    function bytes(const string& $name, bool $nullable = false) : T
+    {
+        return $this->add(Column($name, .bytes, $nullable));
+    }
+
+    /**
+     * `created_at` and `updated_at`, nullable, the columns `#[carbon::created]` and
+     * `#[carbon::updated]` fill.
+     */
+    function timestamps() : T
+    {
+        T $with = $this->add(Column('created_at', .datetime, true));
+        return $with->add(Column('updated_at', .datetime, true));
+    }
+
+    /**
+     * `deleted_at`, nullable, the column `#[carbon::deleted]` fills.
+     */
+    function softDeletes() : T
+    {
+        return $this->add(Column('deleted_at', .datetime, true));
+    }
+}
+
+internal function given(int64? $v) : hydrahon::Value?
+{
+    if ($v == null) {
+        return null;
+    }
+    return hydrahon::Value::from($v);
+}
+
+internal function given(bool? $v) : hydrahon::Value?
+{
+    if ($v == null) {
+        return null;
+    }
+    return hydrahon::Value::from($v);
+}
+
+internal function given(string? $v) : hydrahon::Value?
+{
+    if ($v == null) {
+        return null;
+    }
+    return hydrahon::Value::from($v);
+}
+
+internal function given(float64? $v) : hydrahon::Value?
+{
+    if ($v == null) {
+        return null;
+    }
+    return hydrahon::Value::from($v);
+}
+
+internal function given(hydrahon::Decimal? $v) : hydrahon::Value?
+{
+    if ($v == null) {
+        return null;
+    }
+    return hydrahon::Value::from($v);
+}

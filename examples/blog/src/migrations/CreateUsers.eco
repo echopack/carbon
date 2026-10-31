@@ -1,0 +1,20 @@
+namespace blog;
+
+#[carbon::migration: '20261029120000_create_users']
+public class CreateUsers : carbon::Migration
+{
+    public function up(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->create(carbon::ddl::Table('users')
+            ->id()
+            ->string('email', 190, $unique: true)
+            ->string('name', 190)
+            ->bool('admin', $default: false)
+            ->timestamps());
+    }
+
+    public function down(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->drop('users');
+    }
+}

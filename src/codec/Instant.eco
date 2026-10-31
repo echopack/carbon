@@ -1,0 +1,25 @@
+namespace carbon::codec;
+
+use std::time;
+
+/**
+ * `time::timestamp` as a DATETIME, in UTC. carbongen picks it for every field of that type;
+ * no `#[carbon::codec]` needed:
+ *
+ * ```echo
+ * #[carbon::created]
+ * public time::timestamp? $createdAt = null;
+ * ```
+ */
+public struct Instant : carbon::Codec<time::timestamp, hydrahon::DateTime>
+{
+    public const function decode(hydrahon::DateTime $raw) : result<time::timestamp, carbon::Problem>
+    {
+        return carbon::Temporal::instant($raw);
+    }
+
+    public const function encode(const time::timestamp& $value) : hydrahon::DateTime
+    {
+        return carbon::Temporal::stored($value);
+    }
+}

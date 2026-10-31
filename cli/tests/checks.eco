@@ -289,8 +289,8 @@ test reports_more_model_problems
     assert($p[5] == "src/t.eco:5: app::Note::$other: column 'user_id' is already taken by $user_id");
     assert($p[6] == 'src/t.eco:6: app::Note::$carbonTable: the generated table keeps its hydrahon table in this name; rename the field or mark it #[carbon::skip]');
     assert($p[7] == 'src/t.eco:7: app::Note::$link2: a model has one carbon::Link');
-    assert($p[8] == 'src/t.eco:8: app::Note::$made: #[carbon::created] goes on a hydrahon::DateTime field');
-    assert($p[9] == 'src/t.eco:9: app::Note::$changed: #[carbon::updated] goes on a hydrahon::DateTime field');
+    assert($p[8] == 'src/t.eco:8: app::Note::$made: #[carbon::created] goes on a time::timestamp, calendar::DateTime or hydrahon::DateTime field');
+    assert($p[9] == 'src/t.eco:9: app::Note::$changed: #[carbon::updated] goes on a time::timestamp, calendar::DateTime or hydrahon::DateTime field');
     assert($p[10] == 'src/t.eco:11: app::Note::$left: one #[carbon::deleted] per model');
     assert($p[11] == 'src/t.eco:13: app::Note::$nick: #[carbon::name] needs a column name');
     assert($p[12] == 'src/t.eco:14: app::Note::$count: a computed field is only there when a query selects it, so it needs to be nullable or have a default');

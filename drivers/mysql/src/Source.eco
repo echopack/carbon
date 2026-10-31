@@ -1,0 +1,59 @@
+namespace carbon::mysql;
+
+/**
+ * carbon on MySQL or MariaDB with a connection per session, from a libmysql pool. A session
+ * borrows one with its first statement and gives it back when it is gone, so the transactions of
+ * two sessions, or two threads, never mix.
+ *
+ * ```echo
+ * carbon::mysql::Source $source = guard carbon::mysql::Source::parse('mysql://root@127.0.0.1/blog');
+ * carbon::DB $db = carbon::DB($source);
+ * guard $db->register<PostRepository>();
+ * ```
+ *
+ * Every connection counts the rows an UPDATE matched (`foundRows`), whatever the options say:
+ * carbon relies on it to notice a row that is gone.
+ *
+ * The pool is shared by every thread of a sealed `DB`; each session's connection is its own.
+ */
+#[atomic]
+public class Source : carbon::Source
+{
+    public mysql::Pool $pool;
+    internal hydrahon::Mysql $dialect;
+
+    /**
+     * `$dialect` for a dialect of your own: `hydrahon::Mysql($mariadb: true)` for MariaDB.
+     */
+    public constructor(mysql::Options $options, mysql::PoolOptions $limits = mysql::PoolOptions(), dialect: hydrahon::Mysql $dialect = hydrahon::Mysql())
+    {
+        $options->foundRows = true;
+        $this->pool = mysql::Pool($options, $limits);
+        $this->dialect = $dialect;
+    }
+
+    /**
+     * A pool for `mysql://user:password@host:port/database`. Nothing connects until a session
+     * runs its first statement.
+     */
+    public static function parse(const string& $url) : result<Source, Error>
+    {
+        mysql::Options $o = guard mysql::Options::parse($url) else ($e) { return .error(Driver::failure($e)); }
+        return .ok(Source($o));
+    }
+
+    /**
+     * A connection borrowed from the pool, given back when the session lets go of it.
+     */
+    public function open() : result<carbon::Driver, Error>
+    {
+        mysql::Lease $lease = guard $this->pool->acquire() else ($e) { return .error(Driver::failure($e)); }
+        carbon::Driver $d = Driver(lease: $lease, $this->dialect);
+        return .ok($d);
+    }
+
+    public const function traits() : Traits
+    {
+        return Traits(false, true);
+    }
+}

@@ -1,0 +1,43 @@
+namespace carbon::ddl;
+
+/**
+ * How one database spells schema changes. `carbon::ddl::Mysql` is MySQL's and MariaDB's. What a
+ * grammar cannot express comes back as `.invalid` with the reason, never as a statement that
+ * quietly does less.
+ *
+ * A class, so a `Migrator` can keep it.
+ */
+public interface Grammar
+{
+    /**
+     * The statements that create `$table`.
+     */
+    const function create(const Table& $table) : result<array<string>, carbon::Error>;
+
+    /**
+     * The statements that make the changes of `$alter`, in order.
+     */
+    const function alter(const Alter& $alter) : result<array<string>, carbon::Error>;
+
+    const function drop(const string& $table, bool $exists = false) : string;
+
+    const function rename(const string& $from, const string& $to) : string;
+
+    /**
+     * A statement whose one row holds 1 once this connection holds the lock named `$name`,
+     * waiting up to `$seconds`. Empty when the database has no such lock; the `Migrator` then
+     * runs without one.
+     */
+    const function lock(const string& $name, uint32 $seconds) : string;
+
+    /**
+     * The statement that lets go of the lock `lock` took, empty when there is none.
+     */
+    const function unlock(const string& $name) : string;
+
+    /**
+     * Whether schema changes take part in a transaction. MySQL commits before and after every
+     * one, so a migration there cannot be rolled back as a whole.
+     */
+    const function transactional() : bool;
+}

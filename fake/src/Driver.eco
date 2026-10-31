@@ -12,12 +12,13 @@ use carbon::change::Snapshot;
  * ```echo
  * $fake = carbon::fake::Driver<hydrahon::Mysql>();
  * $fake->rows([[1, 'Hello']])->written(insertId: 7);
- * $db = carbon::Db($fake);
+ * $db = carbon::DB($fake);
  * ```
  *
  * `Driver<hydrahon::Mysql>` reads inserted keys from the last insert id,
  * `Driver<hydrahon::Postgres>` from RETURNING, so both paths can be tested.
  */
+#[atomic]
 public class Driver<D : hydrahon::Dialect> : carbon::Driver
 {
     internal D $dialect;
@@ -208,19 +209,19 @@ public class Driver<D : hydrahon::Dialect> : carbon::Driver
 
     public function begin() : status<Error>
     {
-        $this->statements[] = Control::begin->statement();
+        $this->statements[] = Statement(plain: 'BEGIN');
         return .ok();
     }
 
     public function commit() : status<Error>
     {
-        $this->statements[] = Control::commit->statement();
+        $this->statements[] = Statement(plain: 'COMMIT');
         return .ok();
     }
 
     public function rollback() : status<Error>
     {
-        $this->statements[] = Control::rollback->statement();
+        $this->statements[] = Statement(plain: 'ROLLBACK');
         return .ok();
     }
 

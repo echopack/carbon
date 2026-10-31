@@ -29,7 +29,7 @@ public class Generator
         if ($manifest->empty()) {
             return .error(.input('no module.eco here; run carbongen in the module that declares the models'));
         }
-        if ($manifest->contains('.carbon/') == false || $manifest->contains('CARBON_NOGEN') == false) {
+        if (!Generator::wired($manifest)) {
             return .error(.input(Generator::wiring()));
         }
         json::Value $decls = guard $this->decls() else ($e) {
@@ -42,7 +42,7 @@ public class Generator
             }
             return .error(.problems($schema->problems->count() as int32));
         }
-        $this->say("carbongen  {$schema->models->count()} model(s)");
+        $this->say("carbongen  {$schema->models->count()} model(s), {$schema->migrations->count()} migration(s)");
         return .ok(Emitter($schema)->render());
     }
 
@@ -93,7 +93,65 @@ public class Generator
         if (Json::items($decls, 'modules')->count() == 0) {
             return .error(.tool("{$run->status}", $run->stderr));
         }
+        string? $moved = Generator::unread($decls);
+        if ($moved != null) {
+            string $key = guard $moved;
+            return .error(.input("{$this->echoc} -p decls no longer gives declarations a '{$key}'; this carbongen reads the format of echoc 0.11, so update one or the other"));
+        }
         return .ok($decls);
+    }
+
+    /**
+     * The first key carbongen reads off a declaration that the decls output does not have, null
+     * when it has every one. echoc does not version the format; this is how a change to it
+     * shows up as a message instead of models that quietly lose their columns.
+     */
+    public static function unread(const json::Value& $decls) : string?
+    {
+        array<string> $keys = ['kind', 'qualified', 'file', 'line', 'tools', 'conforms', 'fields'];
+        foreach (Json::items($decls, 'modules') as const &$m) {
+            array<json::Value> $found = Json::items($m, 'declarations');
+            if ($found->count() == 0) {
+                continue;
+            }
+            // one declaration tells: echoc writes every one in the same shape
+            json::Value $d = $found[0];
+            foreach ($keys as const &$k) {
+                json::Value? $has = $d->get($k);
+                if ($has == null) {
+                    return $k;
+                }
+            }
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * Whether `$manifest` leaves `.carbon/` out behind CARBON_NOGEN: a `#[sources: ".carbon/…"]`
+     * line inside an `#[if: !CARBON_NOGEN]` block. Comments do not count.
+     */
+    public static function wired(const string& $manifest) : bool
+    {
+        bool $inside = false;
+        foreach (str::split($manifest, "\n") as const &$raw) {
+            string $line = string::from(str::trim($raw));
+            if ($line->starts('//') || $line->starts('*') || $line->starts('/*')) {
+                continue;
+            }
+            if ($line->starts('#[if:') && $line->contains('!CARBON_NOGEN')) {
+                $inside = true;
+                continue;
+            }
+            if ($line->starts('#[end]')) {
+                $inside = false;
+                continue;
+            }
+            if ($inside && $line->starts('#[sources:') && $line->contains('.carbon/')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function say(const string& $text) : void

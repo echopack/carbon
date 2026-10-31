@@ -1,0 +1,23 @@
+namespace carbongen;
+
+test a_manifest_is_wired_only_by_the_block_itself
+{
+    assert(Generator::wired("#[sources: \"src/*.eco\"]\n\n#[if: !CARBON_NOGEN]\n#[sources: \".carbon/*.eco\"]\n#[end]\n"));
+    // the words alone, in a comment, do not leave .carbon/ out
+    assert(!Generator::wired("// .carbon/ sits behind CARBON_NOGEN\n#[sources: \".carbon/*.eco\"]\n"));
+    // nor does a block for another define
+    assert(!Generator::wired("#[if: CARBON_NOGEN]\n#[sources: \".carbon/*.eco\"]\n#[end]\n"));
+    // .carbon/ outside the block is compiled in the decls pass too
+    assert(!Generator::wired("#[if: !CARBON_NOGEN]\n#[end]\n#[sources: \".carbon/*.eco\"]\n"));
+}
+
+test a_decls_format_that_moved_is_named
+{
+    json::Value $ok = guard json::parse('{"modules": [{"name": "m", "declarations": [{"kind": "class", "qualified": "a::B", "file": "f.eco", "line": 1, "tools": [], "conforms": [], "fields": []}]}]}');
+    assert(Generator::unread($ok) == null);
+    json::Value $moved = guard json::parse('{"modules": [{"name": "m", "declarations": [{"kind": "class", "qualified": "a::B", "file": "f.eco", "line": 1, "attributes": [], "conforms": [], "fields": []}]}]}');
+    assert((Generator::unread($moved) ?? '') == 'tools');
+    // no declarations at all is not a moved format
+    json::Value $empty = guard json::parse('{"modules": [{"name": "m", "declarations": []}]}');
+    assert(Generator::unread($empty) == null);
+}

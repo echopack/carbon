@@ -1,0 +1,227 @@
+namespace carbon;
+
+use std::time;
+
+/*
+ * Conditions and assignments between hydrahon's date columns and the app's time types, so a
+ * `time::timestamp`, `calendar::DateTime` or `calendar::Date` goes where a hydrahon value
+ * would: `->where(PostTable::$publishedAt < $cut)`, `$set[PostTable::$publishedAt] = $at`.
+ * Each converts through `carbon::Temporal` and hands the rest to hydrahon. There are no
+ * nullable forms: NULL keeps hydrahon's own operators, `->isNull()` and `= null`.
+ */
+
+// time::timestamp
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) == (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) != (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) < (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) <= (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) > (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) >= (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) == (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) != (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) < (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) <= (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) > (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) >= (time::timestamp $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::DateTime>& $column] = (time::timestamp $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::DateTime?>& $column] = (time::timestamp $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}
+
+// calendar::DateTime
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) == (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) != (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) < (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) <= (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) > (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime> $a) >= (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) == (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) != (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) < (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) <= (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) > (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::DateTime?> $a) >= (calendar::DateTime $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::DateTime>& $column] = (calendar::DateTime $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::DateTime?>& $column] = (calendar::DateTime $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}
+
+// calendar::Date
+
+operator (hydrahon::Term<hydrahon::Date> $a) == (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date> $a) != (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date> $a) < (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date> $a) <= (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date> $a) > (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date> $a) >= (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) == (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a == Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) != (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a != Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) < (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a < Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) <= (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a <= Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) > (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a > Temporal::stored($b);
+}
+
+operator (hydrahon::Term<hydrahon::Date?> $a) >= (calendar::Date $b) : hydrahon::Term<bool>
+{
+    return $a >= Temporal::stored($b);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::Date>& $column] = (calendar::Date $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}
+
+operator (hydrahon::Values& $s)[const hydrahon::Term<hydrahon::Date?>& $column] = (calendar::Date $value) : void
+{
+    $s[$column] = Temporal::stored($value);
+}

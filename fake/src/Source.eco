@@ -1,0 +1,56 @@
+namespace carbon::fake;
+
+/**
+ * A source for tests: it hands out the fakes it was given, one per session in the order the
+ * sessions run their first statement, so a test can queue each session's answers and read back
+ * what each one ran. Opening more connections than it holds stops the program.
+ *
+ * ```echo
+ * $a = carbon::fake::Driver<hydrahon::Mysql>();
+ * $b = carbon::fake::Driver<hydrahon::Mysql>();
+ * $db = carbon::DB(carbon::fake::Source<hydrahon::Mysql>([$a, $b]));
+ * ```
+ */
+#[atomic]
+public class Source<D : hydrahon::Dialect> : carbon::Source
+{
+    public const array<Driver<D>> $drivers;
+    // sessions on many threads open at once
+    internal atomic<usize> $next;
+
+    public constructor(array<Driver<D>> $drivers)
+    {
+        $this->drivers = $drivers;
+        $this->next = atomic<usize>(0);
+    }
+
+    /**
+     * How many of the fakes were handed out.
+     */
+    public function opened() : usize
+    {
+        return $this->next->load();
+    }
+
+    public function open() : result<carbon::Driver, Error>
+    {
+        usize $at = $this->next->add(1);
+        if ($at >= $this->drivers->count()) {
+            die('carbon fake: no connection left to open');
+        }
+        carbon::Driver $d = $this->drivers[$at];
+        return .ok($d);
+    }
+
+    /**
+     * The first fake's traits: a test that counts changed rows sets `matched` on its fakes.
+     */
+    public const function traits() : Traits
+    {
+        if ($this->drivers->count() > 0) {
+            return $this->drivers[0]->traits();
+        }
+        D $dialect = D();
+        return Traits($dialect->supports(hydrahon::Feature::returning), true);
+    }
+}

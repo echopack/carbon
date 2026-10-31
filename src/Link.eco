@@ -42,8 +42,8 @@ public struct Link
     }
 
     /**
-     * The repository of type `R` registered on the session's `Db`, bound to that session:
-     * `.detached` once the session is gone, `.unregistered` when the `Db` has none.
+     * The repository of type `R` registered on the session's `DB`, bound to that session:
+     * `.detached` once the session is gone, `.unregistered` when the `DB` has none.
      */
     public const function bound<R>() : result<R, Error>
     {

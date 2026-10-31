@@ -1,0 +1,17 @@
+/*
+ * carbon-fake: a driver and a source for tests, so an app's tests run carbon
+ * without a database. The fake renders every statement in a real hydrahon
+ * dialect, keeps it, and answers from a queue the test fills; see
+ * carbon::fake::Driver. A module of its own, so it never ships in an app.
+ * Depend on it from a test target: #[depends: "<carbon>/fake"].
+ */
+
+#[module: "carbon-fake"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "a fake driver for testing carbon apps without a database"]
+
+#[depends: ".."]
+#[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+
+#[sources: "src/*.eco"]

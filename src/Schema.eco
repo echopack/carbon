@@ -1,5 +1,7 @@
 namespace carbon;
 
+use std::time;
+
 use carbon::change::Changes;
 use carbon::change::Snapshot;
 use carbon::select::Selected;
@@ -111,18 +113,18 @@ public interface Schema<M, K>
     /**
      * Set the created and updated timestamps for `$event`, if the model has them.
      */
-    const function stamp(M& $model, Event $event, hydrahon::DateTime $now) : void;
+    const function stamp(M& $model, Event $event, time::timestamp $now) : void;
 
     /**
      * Set the soft delete timestamp (null restores). False when the model has none.
      */
-    const function trash(M& $model, hydrahon::DateTime? $at) : bool;
+    const function trash(M& $model, time::timestamp? $at) : bool;
 
     /**
      * The soft delete timestamp, null when the model is live or has no soft delete column. A
      * delete or restore that fails puts it back with `trash`.
      */
-    const function trashed(const M& $model) : hydrahon::DateTime?;
+    const function trashed(const M& $model) : time::timestamp?;
 
     /**
      * The condition that hides soft deleted rows, or null when the model has none.

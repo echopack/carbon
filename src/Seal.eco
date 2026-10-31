@@ -1,0 +1,27 @@
+namespace carbon;
+
+/**
+ * Whether a `DB`'s wiring is done. One per `DB`, shared by its engine, its registry and every
+ * store it made: after `DB::seal()` nothing registers, observes or listens any more, and the
+ * `DB` may be shared by threads that only read it.
+ */
+#[atomic]
+internal class Seal
+{
+    internal bool $on = false;
+
+    internal constructor()
+    {
+    }
+
+    /**
+     * Stop the program when wiring is attempted on a sealed `DB`: a bug, never a runtime
+     * condition.
+     */
+    internal const function refuse(const string& $what) : void
+    {
+        if ($this->on) {
+            die("carbon: the DB is sealed; {$what} belongs to wiring, before seal()");
+        }
+    }
+}

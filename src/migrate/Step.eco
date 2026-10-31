@@ -1,0 +1,21 @@
+namespace carbon::migrate;
+
+/**
+ * A migration under its id. carbongen writes one per `#[carbon::migration]` class, and knows
+ * whether the class has a `down`.
+ */
+public struct Step : contract::comparable<Step>
+{
+    public string $id;
+    public carbon::Migration $migration;
+
+    /**
+     * Whether the migration has a `down`, so its batch can be rolled back.
+     */
+    public bool $reversible = false;
+}
+
+operator (const Step& $a) < (const Step& $b) : bool
+{
+    return $a->id < $b->id;
+}

@@ -1,0 +1,115 @@
+namespace carbongen;
+
+/**
+ * A declaration `$qualified` at line `$line` with every part given: `$kind`, `$tools`, the
+ * `$fields`, `$constructors` and `$conforms` lists, and `down` among its methods when `$down`.
+ */
+internal function declared(const string& $kind, const string& $qualified, int32 $line, const string& $tools, const string& $fields, const string& $constructors, const string& $conforms, bool $down) : string
+{
+    string $methods = '{"kind": "method", "name": "up"}';
+    if ($down) {
+        $methods->append(', {"kind": "method", "name": "down"}');
+    }
+    return "\{\"kind\": \"{$kind}\", \"qualified\": \"{$qualified}\", \"file\": \"src/t.eco\", \"line\": {$line}, \"tools\": [{$tools}], \"fields\": [{$fields}], \"constructors\": [{$constructors}], \"generics\": [], \"methods\": [{$methods}], \"conforms\": [{$conforms}]}";
+}
+
+/**
+ * A `#[carbon::migration: '$id']` class `$qualified` at line `$line`, conforming to
+ * `carbon::Migration`, declaring `down` when `$down`.
+ */
+internal function migration(const string& $qualified, const string& $id, int32 $line, bool $down) : string
+{
+    return declared('class', $qualified, $line, tool('migration', $id), '', '', named('carbon::Migration', ''), $down);
+}
+
+test migrations_are_listed_in_id_order_with_whether_they_roll_back
+{
+    array<string> $all = [
+        migration('app::AddNickname', '20261030090000_add_nickname', 40, false),
+        migration('app::CreateUsers', '20261029120000_create_users', 30, true),
+    ];
+    Schema $s = Schema::read(decls(str::join($all, ', ')));
+    assert($s->problems->count() == 0);
+    assert($s->migrations->count() == 2);
+    array<Migration> $ordered = $s->migrations('app');
+    assert($ordered[0]->qualified == 'app::CreateUsers');
+    assert($ordered[0]->reversible);
+    assert(!$ordered[1]->reversible);
+
+    string $out = emitted(str::join($all, ', '));
+    assert($out->contains("namespace app;\n"));
+    assert($out->contains("    public static function migrations() : array<carbon::migrate::Step>\n    \{\n        array<carbon::migrate::Step> $out = [\n            carbon::migrate::Step('20261029120000_create_users', app::CreateUsers(), true),\n            carbon::migrate::Step('20261030090000_add_nickname', app::AddNickname(), false),\n        ];\n        return $out;\n    }\n"));
+    // a namespace of migrations alone has nothing to register or check
+    assert(!$out->contains('function register'));
+    assert(!$out->contains('function check'));
+}
+
+test migrations_sit_beside_the_models_of_their_namespace
+{
+    string $both = both(blog(), migration('app::CreateUsers', '20261029120000_create_users', 30, true));
+    string $out = emitted($both);
+    assert($out->contains('public static function migrations() : array<carbon::migrate::Step>'));
+    assert($out->contains('public static function check(carbon::DB $db) : status<carbon::Error>'));
+    // one Carbon per namespace
+    usize $first = $out->find('public struct Carbon');
+    assert($out->find('public struct Carbon', $first + 1) == $out->size());
+}
+
+test a_module_without_migrations_has_no_migrations_function
+{
+    string $out = emitted(blog());
+    assert(!$out->contains('migrations()'));
+}
+
+test migration_ids_are_a_timestamp_and_a_name
+{
+    assert(Migration::valid('20261029120000_create_users'));
+    assert(Migration::valid('20261029120000_v2'));
+    assert(!Migration::valid('20261029120000_'));
+    assert(!Migration::valid('2026102912000_create_users'));
+    assert(!Migration::valid('20261029120000-create_users'));
+    assert(!Migration::valid('20261029120000_CreateUsers'));
+    assert(!Migration::valid('create_users'));
+    array<string> $p = problems(migration('app::Bad', 'create_users', 3, true));
+    assert($p->count() == 1);
+    assert($p[0] == "src/t.eco:3: app::Bad: #[carbon::migration] needs an id of when it was written and a name: #[carbon::migration: '20261029120000_create_users']");
+}
+
+test misused_migrations_are_problems
+{
+    // two with one id
+    array<string> $twice = problems(both(migration('app::A', '20261029120000_a', 3, true), migration('app::B', '20261029120000_a', 9, true)));
+    assert($twice->count() == 1 && $twice[0] == 'src/t.eco:9: app::B: app::A has the id 20261029120000_a already');
+
+    // not a carbon::Migration
+    string $id = tool('migration', '20261029120000_x');
+    string $conforms = named('carbon::Migration', '');
+    array<string> $p = problems(declared('class', 'app::P', 4, $id, '', '', '', true));
+    assert($p->count() == 1 && $p[0] == 'src/t.eco:4: app::P: a migration conforms to carbon::Migration');
+
+    // a struct cannot be kept as an interface value
+    array<string> $sp = problems(declared('struct', 'app::S', 5, $id, '', '', $conforms, false));
+    assert($sp->count() == 1 && $sp[0]->contains('#[carbon::migration] belongs on a class'));
+
+    // carbon builds it with no arguments
+    array<string> $c = problems(declared('class', 'app::C', 6, $id, '', '{}', $conforms, false));
+    assert($c->count() == 1 && $c[0] == 'src/t.eco:6: app::C: a migration keeps the implicit constructor, carbon builds it with no arguments');
+    array<string> $f = problems(declared('class', 'app::F', 7, $id, field('table', 8, TEXT, ''), '', $conforms, false));
+    assert($f->count() == 1 && $f[0] == "src/t.eco:8: app::F::$table: a migration's fields need a default, carbon builds it with no arguments");
+    // a field with a default is fine
+    array<string> $fine = problems(declared('class', 'app::G', 9, $id, field('table', 10, TEXT, '', true), '', $conforms, false));
+    assert($fine->count() == 0);
+
+    // not a model at the same time
+    array<string> $m = problems(declared('class', 'app::M', 10, both($id, tool('model', 'm')), '', '', $conforms, false));
+    assert($m->count() == 1 && $m[0] == 'src/t.eco:10: app::M: a migration is no model or table; keep #[carbon::migration] on a class of its own');
+
+    // nor carrying other carbon attributes
+    array<string> $o = problems(declared('class', 'app::O', 11, both($id, tool('schema', 'x')), '', '', $conforms, false));
+    assert($o->count() == 1);
+
+    // the generated Carbon is taken
+    string $taken = '{"kind": "struct", "qualified": "app::Carbon", "file": "src/t.eco", "line": 1, "tools": [], "fields": []}';
+    array<string> $t = problems(both($taken, migration('app::T', '20261029120000_t', 12, false)));
+    assert($t->count() == 1 && $t[0] == 'src/t.eco:12: app::T: the generated app::Carbon would clash with the declaration of that name');
+}

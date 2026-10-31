@@ -3,9 +3,10 @@
  * built for it, hooks and observers read its context, and models outlive it only detached.
  */
 
-use carbon::{Error, Event, Refusal, Session};
-use hydrahon::Value;
-use fixtures::{World, Note, NoteRepository, Editor, Trail, noteRow, message};
+use carbon::{DB, Error, Event, Refusal, Session};
+use carbon::fake;
+use hydrahon::{Mysql, Value};
+use fixtures::{World, Note, NoteRepository, Tag, TagRepository, Editor, Trail, noteRow, message};
 
 /**
  * What an observer saw of the session each write ran in.
@@ -91,7 +92,7 @@ test observers_are_handed_the_session_of_the_write
 {
     $w = World();
     Trail $seen = Trail();
-    $w->notes->observe(Witness($seen));
+    $w->db->observe<Note>(Witness($seen));
     $w->fake->written($insertId: 1)->written($insertId: 2);
     guard $w->notes->create(Note($title: 'Root'));
     NoteRepository $scoped = guard $w->db->scoped(Editor('boris'))->repo<NoteRepository>();
@@ -144,7 +145,7 @@ test a_model_outlives_its_session_detached_until_attached
 test a_refusal_carries_a_typed_detail
 {
     $w = World();
-    $w->notes->observe(Strict());
+    $w->db->observe<Note>(Strict());
     status<Error> $s = $w->notes->save(Note($title: 'Any'));
     assert(message($s) == 'refused: fix the fields');
     match ($s->failure()) {
@@ -175,4 +176,105 @@ test a_transaction_belongs_to_its_session
     });
     assert($w->fake->texts()[0] == 'BEGIN' && $w->fake->texts()[2] == 'COMMIT');
     assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | by tx | repo after 0');
+}
+
+/**
+ * A `DB` on `$source` with the generated repositories registered.
+ */
+internal function tagged(carbon::Source $source) : DB
+{
+    DB $db = DB($source);
+    guard fixtures::Carbon::register($db);
+    return $db;
+}
+
+/**
+ * Whether `$s` failed with `.busy`.
+ */
+internal function busy(status<Error> $s) : bool
+{
+    if (!$s->failed()) {
+        return false;
+    }
+    return match ($s->failure()) {
+        Error::busy => true,
+        else => false,
+    };
+}
+
+test sessions_run_on_connections_of_their_own
+{
+    $a = fake::Driver<Mysql>();
+    $b = fake::Driver<Mysql>();
+    $source = fake::Source<Mysql>([$a, $b]);
+    DB $db = tagged($source);
+    Session $sa = $db->scoped();
+    Session $sb = $db->scoped();
+    TagRepository $ta = guard $sa->repo<TagRepository>();
+    TagRepository $tb = guard $sb->repo<TagRepository>();
+    $a->written($insertId: 1);
+    $b->written($insertId: 2);
+    Tag $lost = Tag($noteId: 1, $name: 'lost');
+    Tag $kept = Tag($noteId: 1, $name: 'kept');
+    status<Error> $s = $sa->transaction(function[$ta, $tb, $lost, $kept]() : status<Error> {
+        guard $ta->save($lost) else ($e) { return .error($e); }
+        // the other session writes meanwhile, on its own connection and outside this transaction
+        guard $tb->save($kept) else ($e) { return .error($e); }
+        return .error(.invalid('changed my mind'));
+    });
+    assert($s->failed());
+    assert($source->opened() == 2);
+    assert($a->count() == 3 && $a->texts()[0] == 'BEGIN' && $a->texts()[1]->starts('INSERT') && $a->last() == 'ROLLBACK');
+    assert($b->count() == 1 && $b->texts()[0]->starts('INSERT'));
+    // the rollback put back the model its own session wrote, and only that one
+    assert(!$lost->persisted() && $lost->id == 0);
+    assert($kept->persisted() && $kept->id == 2);
+    assert(!$sb->inTransaction());
+}
+
+test a_session_opens_a_transaction_while_another_has_one_open
+{
+    $a = fake::Driver<Mysql>();
+    $b = fake::Driver<Mysql>();
+    DB $db = tagged(fake::Source<Mysql>([$a, $b]));
+    Session $sa = $db->scoped();
+    Session $sb = $db->scoped();
+    TagRepository $tb = guard $sb->repo<TagRepository>();
+    $b->written($insertId: 1);
+    Tag $t = Tag($noteId: 1, $name: 'inner');
+    guard $sa->transaction(function[$sb, $tb, $t]() : status<Error> {
+        return $sb->transaction(function[$tb, $t]() : status<Error> {
+            return $tb->save($t);
+        });
+    });
+    assert(str::join($a->texts(), ' | ') == 'BEGIN | COMMIT');
+    assert($b->count() == 3 && $b->texts()[0] == 'BEGIN' && $b->last() == 'COMMIT');
+    assert($t->persisted() && $t->id == 1);
+}
+
+test one_connection_refuses_other_sessions_while_a_transaction_is_open
+{
+    $fake = fake::Driver<Mysql>();
+    DB $db = tagged(carbon::Single($fake));
+    Session $sa = $db->scoped();
+    Session $sb = $db->scoped();
+    TagRepository $ta = guard $sa->repo<TagRepository>();
+    TagRepository $tb = guard $sb->repo<TagRepository>();
+    $fake->written($insertId: 1);
+    $fake->written($insertId: 2);
+    Tag $x = Tag($noteId: 1, $name: 'x');
+    Tag $y = Tag($noteId: 1, $name: 'y');
+    guard $sa->transaction(function[$ta, $tb, $sb, $x, $y]() : status<Error> {
+        guard $ta->save($x) else ($e) { return .error($e); }
+        // it would have run inside the open transaction: refused, and nothing reaches the driver
+        assert(busy($tb->save($y)));
+        assert(busy($sb->transaction(function() : status<Error> { return .ok(); })));
+        assert(!$y->persisted());
+        return .ok();
+    });
+    // with the transaction closed, the other session runs again
+    guard $tb->save($y);
+    assert($y->id == 2);
+    assert(str::join($fake->texts(), ' | ')->starts('BEGIN | INSERT'));
+    assert($fake->count() == 4 && $fake->texts()[2] == 'COMMIT' && $fake->texts()[3]->starts('INSERT'));
 }

@@ -1,8 +1,10 @@
 namespace carbon;
 
+use std::time;
+
 /**
- * Where work on a `Db` happens: repositories are built for a session, queries run on it, models
- * link to it and transactions are opened on it. A `Db` has a root session for as long as it
+ * Where work on a `DB` happens: repositories are built for a session, queries run on it, models
+ * link to it and transactions are opened on it. A `DB` has a root session for as long as it
  * lives, `$db->session()`; a request makes its own with what it is about, `$db->scoped(...)`.
  *
  * ```echo
@@ -15,6 +17,10 @@ namespace carbon;
  * that hooks and observers read with `get<Editor>()`. Context never holds a session or a
  * repository: a session keeps its context alive, and nothing would ever free the two.
  *
+ * A session has a connection of its own, opened from the `DB`'s source with its first
+ * statement and given back when the session is gone, and its transactions are its own: what
+ * another session writes meanwhile never lands in them.
+ *
  * Models keep only a weak link to their session: once it is gone, `$post->save()` answers
  * `.detached` and `$s2->repo<PostRepository>()->attach($post)` moves it to another.
  */
@@ -24,10 +30,10 @@ public class Session
     internal Connection $connection;
     internal map<type_id, erased> $context = [];
 
-    internal constructor(Registry $registry, Connection $connection)
+    internal constructor(Registry $registry, Engine $engine)
     {
         $this->registry = $registry;
-        $this->connection = $connection;
+        $this->connection = Connection($engine);
     }
 
     /**
@@ -57,7 +63,7 @@ public class Session
     }
 
     /**
-     * The repository of type `R`, built for this session: `.unregistered` when the `Db` has
+     * The repository of type `R`, built for this session: `.unregistered` when the `DB` has
      * none. Building one is cheap; ask for it where it is needed.
      */
     public function repo<R>() : result<R, Error>
@@ -69,7 +75,7 @@ public class Session
     }
 
     /**
-     * Whether the `Db` has a repository of type `R`.
+     * Whether the `DB` has a repository of type `R`.
      */
     public const function has<R>() : bool
     {
@@ -77,7 +83,7 @@ public class Session
     }
 
     /**
-     * The store of model `M`, shared by every session of the `Db`: what the generated
+     * The store of model `M`, shared by every session of the `DB`: what the generated
      * `PostWiring::store()` reaches.
      */
     public function store<M, K, S>() : Store<M, K, S>
@@ -86,7 +92,15 @@ public class Session
     }
 
     /**
-     * The connection this session runs on.
+     * What the `DB`'s clock says, to the second: `$session->now() - time::duration::hours(1)`.
+     */
+    public const function now() : time::timestamp
+    {
+        return $this->connection->now();
+    }
+
+    /**
+     * This session's connection.
      */
     public function connection() : Connection
     {
@@ -94,8 +108,8 @@ public class Session
     }
 
     /**
-     * Run `$work` in a transaction: commit when it succeeds, roll back when it fails and hand
-     * back its error. Transactions do not nest.
+     * Run `$work` in a transaction of this session: commit when it succeeds, roll back when it
+     * fails and hand back its error. Transactions do not nest.
      */
     public function transaction(function<status<Error>()> $work) : status<Error>
     {

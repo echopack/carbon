@@ -1,12 +1,14 @@
 namespace carbon;
 
+use std::time;
+
 /**
- * An app's way into its database: the connection everything runs on, the repositories
- * registered on it (one per type) and the store of every model. Built once at startup, and
+ * An app's way into its database: the source its sessions take their connections from, the
+ * repositories registered on it (one per type) and the store of every model. Built once at startup, and
  * worked with through sessions.
  *
  * ```echo
- * Db $db = Db($driver);
+ * DB $db = DB($driver);
  * guard $db->register<UserRepository>();
  * guard $db->register<PostRepository>(function[$mailer](Session $s) : PostRepository {
  *     return PostRepository($s, $mailer);
@@ -21,31 +23,97 @@ namespace carbon;
  * relation loads its models through the repository registered for them. Transactions are a
  * session's: `$session->transaction(...)`.
  *
- * Until sessions take their connections from a pool, every session of a `Db` shares its one
- * connection: two threads that open transactions on it at once step on each other.
+ * Every session opens a connection of its own from the `DB`'s `Source`, so the transactions of
+ * two sessions never mix: `DB(guard carbon::mysql::Source::parse($url))` takes them from a
+ * pool. A `DB` built on one driver, `DB($driver)`, has one connection for all of them; while one
+ * session has a transaction open on it, the others are refused with `.busy`.
+ *
+ * One `DB` on a pooled source serves any number of threads. Wire it on one thread, then
+ * `seal()` it, and give each thread, request or job a session of its own with `scoped()`:
+ *
+ * ```echo
+ * DB $db = DB(guard carbon::mysql::Source::parse($url));
+ * guard $db->register<PostRepository>();
+ * guard blog::Carbon::check($db);
+ * $db->seal();
+ *
+ * thread::handle $w = guard thread::spawn(function() : void {
+ *     PostRepository $posts = guard $db->scoped()->repo<PostRepository>();
+ * });
+ * ```
+ *
+ * A session, the root one included, and the models it loads belong to one thread. So does a
+ * `DB` on one driver: its one connection serves one thread.
  */
-public class Db
+#[atomic]
+public class DB
 {
-    internal Connection $connection;
+    internal Engine $engine;
     internal Registry $registry;
     internal Session $root;
+    internal Seal $seal;
 
-    public constructor(Driver $driver)
+    /**
+     * A `DB` on one connection, for scripts and tests: every session runs on `$driver`.
+     */
+    public constructor(Driver $driver, clock: calendar::Clock $clock = calendar::SystemClock())
     {
-        $this->connection = Connection($driver);
-        $this->registry = Registry();
-        $this->root = Session($this->registry, $this->connection);
-    }
-
-    public constructor(Driver $driver, clock: Clock $clock)
-    {
-        $this->connection = Connection($driver, clock: $clock);
-        $this->registry = Registry();
-        $this->root = Session($this->registry, $this->connection);
+        $this->seal = Seal();
+        $this->engine = Engine(Single($driver), $clock, $this->seal);
+        $this->registry = Registry($this->seal);
+        $this->root = Session($this->registry, $this->engine);
     }
 
     /**
-     * The session that lives as long as the `Db`: for scripts, startup work and anything that
+     * A `DB` whose sessions each open a connection of their own from `$source`.
+     */
+    public constructor(Source $source, clock: calendar::Clock $clock = calendar::SystemClock())
+    {
+        $this->seal = Seal();
+        $this->engine = Engine($source, $clock, $this->seal);
+        $this->registry = Registry($this->seal);
+        $this->root = Session($this->registry, $this->engine);
+    }
+
+    /**
+     * Finish wiring. From here on the repositories, stores, observers, listeners and schema
+     * names are only read, so threads may share the `DB` without a lock: `register` is refused
+     * with `.sealed`, and `observe`, `listen`, `schema` and a store not made yet stop the
+     * program. Call it after `Carbon::check($db)`, which makes every store, and before the
+     * first thread starts.
+     */
+    public function seal() : void
+    {
+        $this->seal->on = true;
+    }
+
+    /**
+     * Whether `seal()` was called.
+     */
+    public const function sealed() : bool
+    {
+        return $this->seal->on;
+    }
+
+    /**
+     * The clock every session stamps with: give the app the same one, so a test that moves it
+     * moves both.
+     */
+    public const function clock() : calendar::Clock
+    {
+        return $this->engine->clock;
+    }
+
+    /**
+     * What the clock says, to the second: the instant a DATETIME column gives back.
+     */
+    public const function now() : time::timestamp
+    {
+        return Temporal::second($this->engine->clock->now());
+    }
+
+    /**
+     * The session that lives as long as the `DB`: for scripts, startup work and anything that
      * belongs to no request.
      */
     public function session() : Session
@@ -60,7 +128,7 @@ public class Db
      */
     public function scoped<C : class>(C $context) : Session
     {
-        Session $s = Session($this->registry, $this->connection);
+        Session $s = Session($this->registry, $this->engine);
         $s->put<C>($context);
         return $s;
     }
@@ -70,15 +138,15 @@ public class Db
      */
     public function scoped() : Session
     {
-        return Session($this->registry, $this->connection);
+        return Session($this->registry, $this->engine);
     }
 
     /**
-     * The connection sessions run on.
+     * The root session's connection.
      */
     public function connection() : Connection
     {
-        return $this->connection;
+        return $this->root->connection;
     }
 
     /**
@@ -100,11 +168,27 @@ public class Db
      */
     public function register<R>(function<R(Session)> $make) : status<Error>
     {
+        if ($this->seal->on) {
+            return .error(.sealed);
+        }
         if ($this->registry->has(type_id<R>())) {
             return .error(.registered('a repository of this type'));
         }
         $this->registry->factory<R>($make);
         return .ok();
+    }
+
+    /**
+     * Run `$observer` around every write of model `M` from now on, in every session, inside the
+     * repository's own hooks and after the observers added before it:
+     * `$db->observe<Post>(AuditTrail($log))`. Observers are wiring: add them at startup, next to
+     * the repositories, not per request.
+     */
+    public function observe<M>(Observer<M> $observer) : void
+    {
+        $this->seal->refuse('observing a model');
+        Held<array<Observer<M>>> $held = $this->registry->observers<M>();
+        $held->value[] = $observer;
     }
 
     /**
@@ -130,7 +214,7 @@ public class Db
      */
     public function schema(const string& $name, const string& $actual) : void
     {
-        $this->connection->schema($name, $actual);
+        $this->root->connection->schema($name, $actual);
     }
 
     /**
@@ -138,30 +222,31 @@ public class Db
      */
     public const function schema(const string& $name) : string?
     {
-        return $this->connection->schema($name);
+        return $this->root->connection->schema($name);
     }
 
     /**
-     * Tell `$listener` about every statement from now on.
+     * Tell `$listener` about every statement of every session from now on.
      */
     public function listen(Listener $listener) : void
     {
-        $this->connection->listen($listener);
+        $this->root->connection->listen($listener);
     }
 
     /**
-     * Run `$sql` as it is, without parameters: DDL, migrations, anything carbon does not build.
+     * Run `$sql` as it is, without parameters, in the root session: DDL, migrations, anything
+     * carbon does not build.
      */
     public function run(const string& $sql) : result<Written, Error>
     {
-        return $this->connection->run($sql);
+        return $this->root->connection->run($sql);
     }
 
     /**
-     * Whether a transaction is open.
+     * Whether the root session has a transaction open.
      */
     public const function inTransaction() : bool
     {
-        return $this->connection->inTransaction();
+        return $this->root->connection->inTransaction();
     }
 }

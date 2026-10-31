@@ -1,4 +1,5 @@
-use carbon::{Db, Connection, Error, Event, Fault, Failure, Problem, Statement, Written, Traits};
+use carbon::{DB, Connection, Error, Event, Fault, Failure, Problem, Statement, Written, Traits};
+use std::time;
 use carbon::change::{Changes, Snapshot};
 use carbon::listen::Log;
 use carbon::select::{Selected, Pick};
@@ -38,7 +39,7 @@ test a_problem_tells_null_from_another_kind
 {
     $fake = fake::Driver<Mysql>();
     $fake->rows([[Value::none, Value::from('x')]]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
     guard $c->step();
     assert(str::from(Problem::of($c, 0)) == 'is NULL but the field is not nullable');
@@ -59,7 +60,7 @@ test the_fake_reads_every_kind
         Value::from(Time(true, 838, 59, 58, 1)),
         Value::from(false),
     ]]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
     // before the first step there is no row to read
     assert($c->isNull(0));
@@ -124,7 +125,7 @@ function rowsExpected() : void
 {
     $fake = fake::Driver<Mysql>();
     $fake->written();
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     guard $db->connection()->query(hydrahon::Select(from: hydrahon::Table(name: 't')));
 }
 
@@ -141,7 +142,7 @@ function writeExpected() : void
 {
     $fake = fake::Driver<Mysql>();
     $fake->rows([]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     guard $db->run('TRUNCATE t');
 }
 
@@ -156,7 +157,7 @@ test the_fake_stops_at_rows_for_a_write
  */
 function nothingQueued() : void
 {
-    Db $db = Db(fake::Driver<Mysql>());
+    DB $db = DB(fake::Driver<Mysql>());
     guard $db->run('TRUNCATE t');
 }
 
@@ -176,9 +177,9 @@ test listeners_hear_failures_and_parameters
     assert($r->failed());
     guard $w->notes->get(9);
     assert($log->count() == 2);
-    assert($log->entries[0]->failed);
-    assert(!$log->entries[1]->failed);
-    assert($log->entries[1]->statement->params->count() == 1);
+    assert($log->entries()[0]->failed);
+    assert(!$log->entries()[1]->failed);
+    assert($log->entries()[1]->statement->params->count() == 1);
     $log->clear();
     assert($log->count() == 0);
 }
@@ -219,8 +220,8 @@ test schemas_name_other_databases
 test a_db_runs_on_the_clock_it_is_given
 {
     $fake = fake::Driver<Mysql>();
-    carbon::clock::Fixed $clock = carbon::clock::Fixed(unix: 0);
-    Db $db = Db($fake, clock: $clock);
+    calendar::FixedClock $clock = calendar::FixedClock(time::timestamp::from_unix_secs(0));
+    DB $db = DB($fake, clock: $clock);
     guard $db->register<fixtures::NoteRepository>();
     $fake->written($insertId: 1);
     fixtures::NoteRepository $notes = guard $db->session()->repo<fixtures::NoteRepository>();
@@ -229,7 +230,7 @@ test a_db_runs_on_the_clock_it_is_given
     assert($at->year == 1970);
     // the system clock is the default, and it is not 1970
     Connection $c = Connection(fake::Driver<Mysql>());
-    assert($c->clock->now()->year > 2000);
+    assert($c->now()->unix_secs() > 946684800);
 }
 
 /**
@@ -283,7 +284,7 @@ test a_transaction_that_cannot_begin_runs_no_work
 {
     Flaky $d = Flaky();
     $d->failBegin = true;
-    Db $db = Db($d);
+    DB $db = DB($d);
     Done $ran = Done();
     status<Error> $s = $db->session()->transaction(function[$ran]() : status<Error> {
         $ran->yes = true;
@@ -303,7 +304,7 @@ test a_failed_commit_is_the_error
 {
     Flaky $d = Flaky();
     $d->failCommit = true;
-    Db $db = Db($d);
+    DB $db = DB($d);
     status<Error> $s = $db->session()->transaction(function() : status<Error> { return .ok(); });
     assert($s->failure()->retryable());
     assert(!$db->inTransaction());
@@ -564,8 +565,8 @@ test fresh_reads_a_new_copy_through_the_repository
 test observers_run_in_the_order_they_were_added
 {
     $w = World();
-    $w->notes->observe(Parrot($w->notes->trail, 'first'));
-    $w->notes->observe(Parrot($w->notes->trail, 'second'));
+    $w->db->observe<Note>(Parrot($w->notes->trail, 'first'));
+    $w->db->observe<Note>(Parrot($w->notes->trail, 'second'));
     $w->fake->written($insertId: 1);
     guard $w->notes->create(Note($title: 'Heard'));
     assert(str::join($w->notes->trail->heard, ' | ') == 'repo before 0 | first before | second before | first after | second after | repo after 0');

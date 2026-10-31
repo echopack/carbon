@@ -118,11 +118,7 @@ public struct Model
      */
     public const function qualify(const string& $name) : string
     {
-        string $space = $this->space();
-        if ($space->size() == 0) {
-            return $name;
-        }
-        return "{$space}::{$name}";
+        return Names::qualify($this->space(), $name);
     }
 
     public const function key() : const Column&
@@ -178,6 +174,24 @@ public struct Model
     }
 
     /**
+     * Every type the emitter declares for this model, qualified, its relation classes aside:
+     * the names a declaration of the module must not take. A new type the emitter writes is
+     * named here too.
+     */
+    public const function generated() : array<string>
+    {
+        array<string> $out = [$this->qualifiedHandle(), $this->qualify($this->aliasClass()), $this->qualify($this->rowsAlias()), $this->qualify($this->wiringInterface()), $this->qualify('Carbon')];
+        if (!$this->queryDeclared) {
+            $out[] = $this->query;
+        }
+        if ($this->relations->count() > 0) {
+            $out[] = $this->qualify($this->relationsInterface());
+            $out[] = $this->qualify($this->loadStruct());
+        }
+        return $out;
+    }
+
+    /**
      * The interface every repository of the model names: `blog::Post` gets `PostWiring`.
      */
     public const function wiringInterface() : string
@@ -194,14 +208,5 @@ public struct Model
             }
         }
         return null;
-    }
-
-    /**
-     * Whether `$r` belongs to its target through a nullable key, so a model may have none.
-     */
-    public const function optional(const Relation& $r) : bool
-    {
-        Column $fk = guard $this->column($r->foreign) else { return false; }
-        return $r->direction == Direction::belongsTo && $fk->nullable;
     }
 }

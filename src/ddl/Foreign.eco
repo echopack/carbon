@@ -1,0 +1,40 @@
+namespace carbon::ddl;
+
+/**
+ * What the database does to a row whose referenced row is deleted or rekeyed.
+ */
+public enum Action
+{
+    /**
+     * Refuse the delete or update while rows refer to it.
+     */
+    case restrict;
+    case cascade;
+    case setNull;
+    case noAction;
+}
+
+/**
+ * A foreign key: `$column` refers to `$references` of `$table`. An empty name is made from the
+ * table and the column: `posts_author_id_foreign`.
+ */
+public struct Foreign
+{
+    public string $column;
+    public string $table;
+    public string $references = 'id';
+    public Action $onDelete = .restrict;
+    public Action $onUpdate = .restrict;
+    public string $name = '';
+
+    /**
+     * The key's name in table `$table`.
+     */
+    public const function named(const string& $table) : string
+    {
+        if ($this->name->size() > 0) {
+            return $this->name;
+        }
+        return "{$table}_{$this->column}_foreign";
+    }
+}

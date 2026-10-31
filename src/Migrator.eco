@@ -1,0 +1,338 @@
+namespace carbon;
+
+use carbon::ddl::Grammar;
+use carbon::migrate::{Step, Applied, Report, Ledger};
+
+/**
+ * Runs an app's migrations against its database, and keeps track of which ran in a table of
+ * its own, `carbon_migrations` unless told otherwise.
+ *
+ * ```echo
+ * carbon::Migrator $migrator = carbon::Migrator($db, blog::Carbon::migrations(), carbon::ddl::Mysql());
+ * array<string> $ran = guard $migrator->up();
+ * ```
+ *
+ * Everything runs in a session of its own, on one connection, holding the database's lock for
+ * migrations (`GET_LOCK` on MySQL) so two copies of the app starting together do not run the
+ * same migration twice. The other one waits up to `$wait` seconds, then gets `.locked`.
+ *
+ * Where the grammar's schema changes are transactional, a migration and its ledger row commit
+ * together. Elsewhere (MySQL commits every schema change on its own) a migration that fails
+ * halfway leaves what it changed before failing, and is not recorded as run: one schema change
+ * per migration keeps that from hurting.
+ */
+public class Migrator
+{
+    internal Session $session;
+    internal Grammar $grammar;
+    internal array<Step> $steps;
+
+    /**
+     * Where each id sits in `$steps`.
+     */
+    internal map<string, usize> $index = [];
+    internal Ledger $ledger;
+
+    /**
+     * Whether the ledger was made in this call, so `reset` makes it once rather than before
+     * every batch.
+     */
+    internal bool $prepared = false;
+
+    /**
+     * How long to wait for another migrator to finish, in seconds.
+     */
+    public uint32 $wait = 10;
+
+    public constructor(DB $db, array<Step> $steps, Grammar $grammar, string $table = 'carbon_migrations')
+    {
+        $this->session = $db->scoped();
+        $this->grammar = $grammar;
+        $steps->sort();
+        $this->steps = mv $steps;
+        foreach ($this->steps as $i => const &$s) {
+            $this->index[$s->id] = $i;
+        }
+        $this->ledger = Ledger($table);
+    }
+
+    /**
+     * What ran, what has not, and what the ledger holds that the app does not know.
+     */
+    public function status() : result<Report, Error>
+    {
+        return $this->locked<Report>(function[$this]() : result<Report, Error> {
+            return $this->report();
+        });
+    }
+
+    /**
+     * Run every migration that has not run yet, in id order, as one batch. Hands back the ids
+     * that ran.
+     */
+    public function up() : result<array<string>, Error>
+    {
+        return $this->up(to: '');
+    }
+
+    /**
+     * Run the migrations that have not run yet, up to and including `$id`. An empty `$id` runs
+     * them all.
+     */
+    public function up(to: string $id) : result<array<string>, Error>
+    {
+        return $this->locked<array<string>>(function[$this, $id]() : result<array<string>, Error> {
+            return $this->forward($id);
+        });
+    }
+
+    /**
+     * Undo the last batch, newest first. Refused before anything runs when one of its
+     * migrations has no `down`, or is unknown to the app. Hands back the ids undone.
+     */
+    public function down() : result<array<string>, Error>
+    {
+        return $this->locked<array<string>>(function[$this]() : result<array<string>, Error> {
+            return $this->back();
+        });
+    }
+
+    /**
+     * Undo every batch, newest first, until nothing is left.
+     */
+    public function reset() : result<array<string>, Error>
+    {
+        return $this->locked<array<string>>(function[$this]() : result<array<string>, Error> {
+            array<string> $all = [];
+            while (true) {
+                array<string> $undone = guard $this->back() else ($e) { return .error($e); }
+                if ($undone->count() == 0) {
+                    return .ok($all);
+                }
+                foreach ($undone as const &$id) {
+                    $all[] = $id;
+                }
+            }
+            return .ok($all);
+        });
+    }
+
+    internal function report() : result<Report, Error>
+    {
+        usize $i = 1;
+        while ($i < $this->steps->count()) {
+            if ($this->steps[$i]->id == $this->steps[$i - 1]->id) {
+                return .error(.invalid("two migrations have the id {$this->steps[$i]->id}"));
+            }
+            $i = $i + 1;
+        }
+        guard $this->prepare() else ($e) { return .error($e); }
+        array<Applied> $applied = guard $this->ledger->read($this->session->connection) else ($e) { return .error($e); }
+        Report $r = Report();
+        map<string, bool> $ran = [];
+        foreach ($applied as const &$a) {
+            $ran[$a->id] = true;
+            if (!$this->knows($a->id)) {
+                $r->unknown[] = $a->id;
+            }
+        }
+        foreach ($this->steps as const &$s) {
+            if (!$ran->has($s->id)) {
+                $r->pending[] = $s->id;
+            }
+        }
+        $r->applied = mv $applied;
+        return .ok($r);
+    }
+
+    internal function forward(const string& $to) : result<array<string>, Error>
+    {
+        if ($to->size() > 0 && !$this->knows($to)) {
+            return .error(.invalid("no migration has the id {$to}"));
+        }
+        Report $r = guard $this->report() else ($e) { return .error($e); }
+        int64 $batch = $r->last() + 1;
+        array<string> $ran = [];
+        foreach ($r->pending as const &$id) {
+            if ($to->size() > 0 && $id > $to) {
+                break;
+            }
+            Step $s = $this->steps[$this->index->get($id)];
+            guard $this->apply($s, $batch) else ($e) { return .error($e); }
+            $ran[] = $id;
+        }
+        return .ok($ran);
+    }
+
+    internal function back() : result<array<string>, Error>
+    {
+        Report $r = guard $this->report() else ($e) { return .error($e); }
+        int64 $last = $r->last();
+        // the batch newest first, every one checked before any runs
+        array<Step> $undo = [];
+        array<string> $unknown = [];
+        usize $i = $r->applied->count();
+        while ($i > 0) {
+            $i = $i - 1;
+            if ($r->applied[$i]->batch != $last) {
+                continue;
+            }
+            string $id = $r->applied[$i]->id;
+            Step? $found = $this->step($id);
+            if ($found == null) {
+                $unknown[] = $id;
+                continue;
+            }
+            Step $s = guard $found;
+            if (!$s->reversible) {
+                return .error(.irreversible($id));
+            }
+            $undo[] = $s;
+        }
+        if ($unknown->count() > 0) {
+            return .error(.unknown(str::join($unknown, ', ')));
+        }
+        array<string> $undone = [];
+        foreach ($undo as const &$s) {
+            guard $this->revert($s) else ($e) { return .error($e); }
+            $undone[] = $s->id;
+        }
+        return .ok($undone);
+    }
+
+    /**
+     * Run `$s` and record it under `$batch`.
+     */
+    internal function apply(const Step& $s, int64 $batch) : status<Error>
+    {
+        Migration $migration = $s->migration;
+        string $id = $s->id;
+        hydrahon::DateTime $now = Temporal::stored($this->session->connection->now());
+        return $this->perform($id, function[$this, $migration, $id, $batch, $now](Migrating $m) : status<Error> {
+            guard $migration->up($m) else ($e) { return .error($e); }
+            return $this->ledger->add($this->session->connection, $id, $batch, $now);
+        });
+    }
+
+    /**
+     * Run the `down` of `$s` and strike it from the ledger.
+     */
+    internal function revert(const Step& $s) : status<Error>
+    {
+        Migration $migration = $s->migration;
+        string $id = $s->id;
+        return $this->perform($id, function[$this, $migration, $id](Migrating $m) : status<Error> {
+            guard $migration->down($m) else ($e) { return .error($e); }
+            return $this->ledger->remove($this->session->connection, $id);
+        });
+    }
+
+    /**
+     * Run `$step` of migration `$id`, in a transaction when the grammar's schema changes take
+     * part in one, and name the migration in its error.
+     */
+    internal function perform(const string& $id, function<status<Error>(Migrating)> $step) : status<Error>
+    {
+        Migrating $m = Migrating($this->session, $this->grammar);
+        function<status<Error>()> $work = function[$m, $step]() : status<Error> {
+            return $step($m);
+        };
+        status<Error> $done = .ok();
+        if ($this->grammar->transactional()) {
+            $done = $this->session->transaction($work);
+        } else {
+            $done = $work();
+        }
+        if (!$done->failed()) {
+            return .ok();
+        }
+        string $message = str::from($done->failure());
+        if (!$this->grammar->transactional()) {
+            $message->append('; what it changed before failing stays, and it is not recorded as run');
+        }
+        return .error(.migration($id, $message));
+    }
+
+    /**
+     * Create the ledger if it is missing.
+     */
+    internal function prepare() : status<Error>
+    {
+        if ($this->prepared) {
+            return .ok();
+        }
+        guard Migrating($this->session, $this->grammar)->create($this->ledger->table()) else ($e) { return .error($e); }
+        $this->prepared = true;
+        return .ok();
+    }
+
+    /**
+     * Run `$work` holding the database's lock for migrations, and let go of it after, whatever
+     * `$work` answered.
+     */
+    internal function locked<T>(function<result<T, Error>()> $work) : result<T, Error>
+    {
+        $this->prepared = false;
+        string $take = $this->grammar->lock($this->ledger->name, $this->wait);
+        if ($take->size() == 0) {
+            return $work();
+        }
+        guard $this->acquire($take) else ($e) { return .error($e); }
+        result<T, Error> $done = $work();
+        status<Error> $let = $this->release($this->grammar->unlock($this->ledger->name));
+        if ($let->failed() && !$done->failed()) {
+            return .error($let->failure());
+        }
+        return $done;
+    }
+
+    /**
+     * Take the lock with `$sql`. The answer's cursor is read to its end here, so the connection
+     * is free again before the work runs: a streaming result left open refuses every statement
+     * after it.
+     */
+    internal function acquire(const string& $sql) : status<Error>
+    {
+        Cursor $rows = guard $this->session->connection->ask($sql) else ($e) { return .error($e); }
+        bool $one = guard $rows->step() else ($e) { return .error($e); }
+        int64? $got = null;
+        if ($one) {
+            $got = $rows->int(0);
+        }
+        guard Migrator::drain($rows) else ($e) { return .error($e); }
+        if (($got ?? 0) != 1) {
+            return .error(.locked);
+        }
+        return .ok();
+    }
+
+    internal function release(const string& $sql) : status<Error>
+    {
+        Cursor $rows = guard $this->session->connection->ask($sql) else ($e) { return .error($e); }
+        return Migrator::drain($rows);
+    }
+
+    internal static function drain(Cursor $rows) : status<Error>
+    {
+        while (true) {
+            bool $more = guard $rows->step() else ($e) { return .error($e); }
+            if (!$more) {
+                return .ok();
+            }
+        }
+        return .ok();
+    }
+
+    internal const function knows(const string& $id) : bool
+    {
+        return $this->index->has($id);
+    }
+
+    internal const function step(const string& $id) : Step?
+    {
+        if (!$this->index->has($id)) {
+            return null;
+        }
+        return $this->steps[$this->index->get($id)];
+    }
+}

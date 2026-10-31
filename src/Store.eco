@@ -1,5 +1,7 @@
 namespace carbon;
 
+use std::time;
+
 use carbon::change::Changes;
 use carbon::change::Snapshot;
 use carbon::select::Selected;
@@ -7,32 +9,50 @@ use carbon::select::Selected;
 /**
  * The engine that keeps models of type `M` (key `K`, schema `S`) in their table: reading rows
  * into linked models, inserting, updating only what changed, soft and hard deletes, timestamps
- * and observers. A `Db` makes one store per model the first time a session asks for it, and
+ * and observers. A `DB` makes one store per model the first time a session asks for it, and
  * owns it from then on; apps never name it.
  *
  * A write is handed the repository it runs for, bound to a session: its `before` and `after`
  * run around the write, the statement runs on the session's connection, and the model links to
- * that session.
+ * that session. A store keeps nothing of a session, so the sessions of many threads share it.
  */
+#[atomic]
 public class Store<M, K, S>
 {
     /**
      * The schema: the generated table class, or one written by hand.
      */
     public const S $table;
-    internal array<Observer<M>> $observers = [];
+
+    /**
+     * The model's observers: the `DB`'s, registered with `$db->observe<M>(...)`.
+     */
+    internal Held<array<Observer<M>>> $observers;
+    internal Seal $seal;
 
     public constructor()
     {
         $this->table = S();
+        array<Observer<M>> $none = [];
+        $this->observers = Held<array<Observer<M>>>($none);
+        $this->seal = Seal();
+    }
+
+    internal constructor(Held<array<Observer<M>>> $observers, Seal $seal)
+    {
+        $this->table = S();
+        $this->observers = $observers;
+        $this->seal = $seal;
     }
 
     /**
      * Run `$observer` around every write from now on, in the order observers were added.
+     * Wiring: not once the `DB` is sealed.
      */
     public function observe(Observer<M> $observer) : void
     {
-        $this->observers[] = $observer;
+        $this->seal->refuse('observing a model');
+        $this->observers->value[] = $observer;
     }
 
     /**
@@ -51,7 +71,7 @@ public class Store<M, K, S>
      */
     public function save<R>(M& $model, R& $hooks) : status<Error>
     {
-        guard $this->writable($model) else ($e) { return .error($e); }
+        guard $this->writable($model, $hooks->session()) else ($e) { return .error($e); }
         if (!$this->table->link($model)->persisted) {
             return $this->insert($model, $hooks);
         }
@@ -77,7 +97,7 @@ public class Store<M, K, S>
      */
     public function delete<R>(M& $model, R& $hooks) : status<Error>
     {
-        guard $this->writable($model) else ($e) { return .error($e); }
+        guard $this->writable($model, $hooks->session()) else ($e) { return .error($e); }
         // bound first: a value compared with null where it is made is never let go of
         hydrahon::Term<bool>? $live = $this->table->live();
         if ($live == null) {
@@ -92,7 +112,7 @@ public class Store<M, K, S>
         Session $s = $hooks->session();
         $this->remember($model, $s, .deleting);
         guard $this->before(.deleting, $model, $hooks) else ($e) { return .error($e); }
-        return $this->retrash($model, $s, $hooks, .deleting, $s->connection->clock->now());
+        return $this->retrash($model, $s, $hooks, .deleting, $s->connection->now());
     }
 
     /**
@@ -100,7 +120,7 @@ public class Store<M, K, S>
      */
     public function restore<R>(M& $model, R& $hooks) : status<Error>
     {
-        guard $this->writable($model) else ($e) { return .error($e); }
+        guard $this->writable($model, $hooks->session()) else ($e) { return .error($e); }
         hydrahon::Term<bool>? $live = $this->table->live();
         if ($live == null || !$this->table->link($model)->persisted) {
             return .error(.missing);
@@ -119,9 +139,9 @@ public class Store<M, K, S>
      * a model left trashed (or live) while its row is not would turn its next `save` into a
      * delete (or a restore).
      */
-    internal function retrash<R>(M& $model, Session $s, R& $hooks, Event $event, hydrahon::DateTime? $at) : status<Error>
+    internal function retrash<R>(M& $model, Session $s, R& $hooks, Event $event, time::timestamp? $at) : status<Error>
     {
-        hydrahon::DateTime? $was = $this->table->trashed($model);
+        time::timestamp? $was = $this->table->trashed($model);
         $this->table->trash($model, $at);
         guard $this->update($model, $s, $event) else ($e) {
             $this->table->trash($model, $was);
@@ -136,7 +156,7 @@ public class Store<M, K, S>
      */
     public function purge<R>(M& $model, R& $hooks) : status<Error>
     {
-        guard $this->writable($model) else ($e) { return .error($e); }
+        guard $this->writable($model, $hooks->session()) else ($e) { return .error($e); }
         if (!$this->table->link($model)->persisted) {
             return .error(.missing);
         }
@@ -191,12 +211,22 @@ public class Store<M, K, S>
 
     /**
      * Refuse to write a model loaded read-only: with no copy of its row, carbon cannot tell
-     * what changed.
+     * what changed. Refuse to write the row of a model with a version through a driver that
+     * counts only the rows a write changed: a row whose version moved on would look the same
+     * as one that already held the values, and the write would pass for done.
      */
-    internal function writable(M& $model) : status<Error>
+    internal function writable(M& $model, Session $s) : status<Error>
     {
-        if ($this->table->link($model)->readonly) {
+        Link& $l = $this->table->link($model);
+        if ($l->readonly) {
             return .error(.invalid('the model was loaded read-only; load it again to write it'));
+        }
+        if (!$l->persisted) {
+            return .ok();
+        }
+        int64? $version = $this->table->version($model);
+        if ($version != null && !$s->connection->traits()->matched) {
+            return .error(.invalid('a model with a version needs a driver that counts matched rows: open it with carbon::mysql::Source or Driver::open'));
         }
         return .ok();
     }
@@ -262,7 +292,7 @@ public class Store<M, K, S>
         Connection $db = $s->connection;
         $this->remember($model, $s, .creating);
         guard $this->before(.creating, $model, $hooks) else ($e) { return .error($e); }
-        $this->table->stamp($model, .creating, $db->clock->now());
+        $this->table->stamp($model, .creating, $db->now());
         Changes $only = Changes(all: $this->table->fields()->count());
         bool $generated = $this->table->generated();
         if ($generated) {
@@ -274,7 +304,7 @@ public class Store<M, K, S>
         $q->row(mv $row);
         if (!$generated) {
             guard $db->exec($q) else ($e) { return .error($e); }
-        } else if ($db->driver->traits()->returning) {
+        } else if ($db->traits()->returning) {
             array<hydrahon::Field> $fields = $this->table->fields();
             $q->returning([$fields[$this->table->keyAt()]]);
             Cursor $rows = guard $db->query($q) else ($e) { return .error($e); }
@@ -282,7 +312,7 @@ public class Store<M, K, S>
             if (!$one) {
                 return .error(.missing);
             }
-            int64 $key = guard $rows->int(0) else { return .error(.column('key', Problem::of($rows, 0))); }
+            int64 $key = guard $this->key($rows) else { return .error(.column('key', Problem::of($rows, 0))); }
             $this->table->inserted($model, $key);
         } else {
             Written $w = guard $db->exec($q) else ($e) { return .error($e); }
@@ -294,12 +324,26 @@ public class Store<M, K, S>
     }
 
     /**
+     * The key RETURNING read, signed or not. One past the end of `int64` keeps its bits, and
+     * `Schema::inserted` of a `uint64` key takes them back.
+     */
+    internal const function key(const Cursor& $row) : int64?
+    {
+        int64? $signed = $row->int(0);
+        if ($signed != null) {
+            return $signed;
+        }
+        uint64 $unsigned = guard $row->uint(0) else { return null; }
+        return $unsigned as int64;
+    }
+
+    /**
      * Stamp and write the columns that changed. No hooks; the callers run them, and refuse a
      * changed key before they do. A hook may still have changed it, so it is checked again.
      */
     internal function update(M& $model, Session $s, Event $event) : status<Error>
     {
-        $this->table->stamp($model, $event, $s->connection->clock->now());
+        $this->table->stamp($model, $event, $s->connection->now());
         // the row must still hold the version the model has; it gets the next one
         int64? $version = $this->table->version($model);
         if ($version != null) {
@@ -352,7 +396,7 @@ public class Store<M, K, S>
      */
     internal const function found(const Written& $w, Connection $db) : status<Error>
     {
-        if ($w->affected == 0 && $db->driver->traits()->matched) {
+        if ($w->affected == 0 && $db->traits()->matched) {
             return .error(.stale);
         }
         return .ok();
@@ -374,7 +418,7 @@ public class Store<M, K, S>
         S $table = $this->table;
         M $handle = $model;
         Link $was = $this->table->link($model);
-        hydrahon::DateTime? $trashed = $this->table->trashed($model);
+        time::timestamp? $trashed = $this->table->trashed($model);
         int64? $version = $this->table->version($model);
         bool $rekey = $event == Event::creating && $this->table->generated();
         bool $retrash = $event == Event::deleting || $event == Event::restoring;
@@ -404,7 +448,7 @@ public class Store<M, K, S>
     {
         guard $hooks->before($event, $model) else ($e) { return .error($e); }
         Session $s = $hooks->session();
-        foreach ($this->observers as &$o) {
+        foreach ($this->observers->value as &$o) {
             guard $o->before($s, $event, $model) else ($e) { return .error($e); }
         }
         return .ok();
@@ -416,7 +460,7 @@ public class Store<M, K, S>
     internal function after<R>(Event $event, const M& $model, R& $hooks) : void
     {
         Session $s = $hooks->session();
-        foreach ($this->observers as &$o) {
+        foreach ($this->observers->value as &$o) {
             $o->after($s, $event, $model);
         }
         $hooks->after($event, $model);

@@ -89,7 +89,7 @@ test narrow_numbers_and_other_kinds
 test an_updated_stamp_is_set_on_every_write
 {
     string $out = emitted(wide());
-    assert($out->contains("    public const function stamp(app::Note& $m, carbon::Event $event, hydrahon::DateTime $now) : void\n    \{\n        $m->touched = $now;\n    }"));
+    assert($out->contains("    public const function stamp(app::Note& $m, carbon::Event $event, std::time::timestamp $now) : void\n    \{\n        $m->touched = carbon::Temporal::stored($now);\n    }"));
     // no created stamp, so no created() order
     assert(!$out->contains('    public const function created() : hydrahon::Order?'));
 }
@@ -149,14 +149,13 @@ test relations_across_namespaces_and_string_keys
 {
     string $out = emitted(spread());
     // a nullable string key to a model outside any namespace
-    assert($out->contains('        carbon::relation::Keys<string> $keys = carbon::relation::Keys<string>();'));
-    assert($out->contains('        carbon::relation::Index<string, Setting> $by = carbon::relation::Index<string, Setting>();'));
-    assert($out->contains("            if ($m->settingName != null) \{\n                string $k = guard $m->settingName;\n                Setting? $held = null;\n                if ($reuse) \{\n                    $held = $seen->find<string, Setting>($k);\n                }\n                if ($held == null) \{\n                    $keys->add($k);"));
-    assert($out->contains('            SettingQuery $q = guard $this->fetch->query($session, SettingTable::$name in $keys->list(), $seen) else ($e) { return .error($e); }'));
+    assert($out->contains('    internal carbon::relation::Loader<app::Comment, Setting, string, string, SettingQuery, SettingRepository> $loader;'));
+    assert($out->contains("            belongsTo: 'SettingRepository',\n            function(app::Comment $m) : string? \{ return $m->settingName; },\n            function(Setting $t) : string? \{ return $t->name; },"));
+    assert($out->contains('            function(array<string> $keys) : hydrahon::Term<bool> { return SettingTable::$name in mv $keys; },'));
     // the related model of another namespace is named in full
-    assert($out->contains('    internal carbon::relation::Fetch<other::Note, other::NoteQuery, other::NoteRepository> $fetch;'));
-    assert($out->contains('            other::NoteQuery $q = guard $this->fetch->query($session, other::NoteTable::$commentId in $keys->list(), $seen) else ($e) { return .error($e); }'));
-    assert($out->contains('        carbon::relation::Index<string, other::Note> $by = carbon::relation::Index<string, other::Note>();'));
+    assert($out->contains('    internal carbon::relation::Loader<app::Comment, other::Note, string, '));
+    assert($out->contains('            function(array<string> $keys) : hydrahon::Term<bool> { return other::NoteTable::$commentId in mv $keys; },'));
+    assert($out->contains('            function(app::Comment $m, array<other::Note> $found) : void { $m->notes->set(mv $found); }'));
     assert($out->contains('    function withNotes(function<other::NoteQuery(other::NoteQuery)> $constrain) : S'));
     assert($out->contains('public struct CommentRepository : carbon::Repository<app::Comment, app::CommentQuery, string>, CommentWiring'));
 }
@@ -231,14 +230,16 @@ test every_namespace_checks_its_wiring
     assert($out->find("public struct Carbon\n\{", $other) < $out->size());
     // a namespace checks its own repositories and the ones its relations load through, each once
     string $appCheck = $out->sub($app, $other - $app);
-    assert($appCheck->contains("        if (!$db->has<app::CommentRepository>()) \{\n            return .error(.unregistered('app::CommentRepository'));\n        }"));
-    assert($appCheck->contains("        if (!$db->has<SettingRepository>()) \{\n            return .error(.unregistered('SettingRepository'));\n        }"));
+    assert($appCheck->contains("        if (!$db->has<app::CommentRepository>()) \{\n            $missing[] = 'app::CommentRepository';\n        }"));
+    assert($appCheck->contains("        if (!$db->has<SettingRepository>()) \{\n            $missing[] = 'SettingRepository';\n        }"));
+    // every one left out is named at once
+    assert($appCheck->contains("        if ($missing->count() > 0) \{\n            return .error(.unregistered(str::join($missing, ', ')));\n        }"));
     assert($appCheck->contains("        if (!$db->has<other::NoteRepository>()) \{"));
     // and makes every store of its own models before any request runs
     assert($appCheck->contains('        $db->store<app::Comment, string, app::CommentTable>();'));
     assert(!$appCheck->contains('store<other::Note'));
     // the relation names the repository it needs, for the error when it is missing
-    assert($out->contains("$this->fetch = carbon::relation::Fetch<other::Note, other::NoteQuery, other::NoteRepository>('other::NoteRepository');"));
+    assert($out->contains("            hasMany: 'other::NoteRepository',"));
 }
 
 test a_declared_carbon_would_clash
@@ -249,4 +250,59 @@ test a_declared_carbon_would_clash
     array<string> $p = problems("{$taken}, {$note}");
     assert($p->count() == 1);
     assert($p[0] == 'src/t.eco:1: app::Note: the generated app::Carbon would clash with the declaration of that name');
+}
+
+test time_fields_go_through_carbons_time_codecs
+{
+    array<string> $more = [
+        field('createdAt', 3, named('std::time::timestamp', ''), tool('created', ''), true),
+        field('updatedAt', 4, named('calendar::DateTime', ''), tool('updated', ''), true),
+        field('deletedAt', 5, optional(named('std::time::timestamp', '')), tool('deleted', ''), true),
+        field('day', 6, named('calendar::Date', ''), '', true),
+        field('until', 7, optional(named('calendar::Date', '')), '', true),
+    ];
+    string $out = emitted(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($out->contains('    public static hydrahon::Term<hydrahon::DateTime> $createdAt = carbon::select::column<hydrahon::DateTime>'));
+    assert($out->contains('    public static hydrahon::Term<hydrahon::Date?> $until = carbon::select::column<hydrahon::Date?>'));
+    assert($out->contains("        std::time::timestamp $c1 = guard carbon::codec::Instant()->decode($r1) else ($p) \{ return .error(.column('created_at', $p)); }"));
+    assert($out->contains("        calendar::DateTime $c2 = guard carbon::codec::Wall()->decode($r2) else ($p) \{ return .error(.column('updated_at', $p)); }"));
+    assert($out->contains("        hydrahon::Date $r4 = guard $row->date(4) else"));
+    assert($out->contains('        calendar::Date $c4 = guard carbon::codec::Day()->decode($r4)'));
+    assert($out->contains("        if ($m->deletedAt != null) \{\n            std::time::timestamp $x3 = guard $m->deletedAt;\n            $s3 = carbon::codec::Instant()->encode($x3);"));
+    assert($out->contains("            $m->createdAt = $now;\n        }\n        $m->updatedAt = carbon::Temporal::wall($now);"));
+    assert($out->contains("    public const function trash(app::Note& $m, std::time::timestamp? $at) : bool\n    \{\n        $m->deletedAt = $at;\n        return true;"));
+    assert($out->contains("    public const function trashed(const app::Note& $m) : std::time::timestamp?\n    \{\n        return $m->deletedAt;"));
+    assert($out->contains('        return NoteTable::$deletedAt->isNull();'));
+}
+
+test a_wall_clock_soft_delete_converts_its_stamp
+{
+    array<string> $more = [
+        field('gone', 3, optional(named('calendar::DateTime', '')), tool('deleted', ''), true),
+    ];
+    string $out = emitted(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($out->contains("        std::time::timestamp $t = guard $at else \{\n            $m->gone = null;\n            return true;\n        }\n        $m->gone = carbon::Temporal::wall($t);"));
+    assert($out->contains("        calendar::DateTime $d = guard $m->gone else \{\n            return null;\n        }\n        return carbon::Temporal::instant($d);"));
+}
+
+test a_hydrahon_soft_delete_converts_its_stamp
+{
+    array<string> $more = [
+        field('gone', 3, optional(named('hydrahon::DateTime', '')), tool('deleted', ''), true),
+    ];
+    string $out = emitted(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($out->contains('        $m->gone = carbon::Temporal::stored($t);'));
+    assert($out->contains("        std::time::timestamp $t = guard carbon::Temporal::instant($d) else \{\n            return null;\n        }\n        return $t;"));
+}
+
+test stamps_refuse_dates_and_a_soft_delete_needs_null
+{
+    array<string> $more = [
+        field('made', 3, named('calendar::Date', ''), tool('created', ''), true),
+        field('gone', 4, named('std::time::timestamp', ''), tool('deleted', ''), true),
+    ];
+    array<string> $p = problems(model('app::Note', 'notes', 1, 'app::NoteRepository', $more));
+    assert($p->count() == 2);
+    assert($p[0] == 'src/t.eco:3: app::Note::$made: #[carbon::created] goes on a time::timestamp, calendar::DateTime or hydrahon::DateTime field');
+    assert($p[1] == 'src/t.eco:4: app::Note::$gone: #[carbon::deleted] goes on a nullable time::timestamp, calendar::DateTime or hydrahon::DateTime field');
 }

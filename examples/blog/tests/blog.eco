@@ -1,17 +1,17 @@
 use blog::{UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostTable, UserTable, CommentTable, PostQuery, CommentQuery};
-use carbon::{Db, Error};
+use carbon::{DB, Error};
 use carbon::listen::Log;
 use carbon::fake;
-use carbon::clock;
+use std::time;
 use hydrahon::{Value, Mysql};
 
 /**
- * A blog on a fake MySQL, on a fixed clock: the Db with the three repositories registered.
+ * A blog on a fake MySQL, on a fixed clock: the DB with the three repositories registered.
  */
 class Rig
 {
     public fake::Driver<Mysql> $fake;
-    public Db $db;
+    public DB $db;
     public Log $log;
     public UserRepository $users;
     public PostRepository $posts;
@@ -21,7 +21,7 @@ class Rig
     {
         $this->fake = fake::Driver<Mysql>();
         $this->log = Log();
-        $this->db = Db($this->fake, clock: clock::Fixed(unix: 1700000000));
+        $this->db = DB($this->fake, clock: calendar::FixedClock(time::timestamp::from_unix_secs(1700000000)));
         $this->db->listen($this->log);
         guard $this->db->register<UserRepository>();
         guard $this->db->register<PostRepository>();
@@ -133,8 +133,8 @@ test eager_loading_costs_one_query_per_relation
     $r->fake->rows([CommentTable()->row(Comment($id: 100, $postId: 3, $body: 'nice'))]);
     array<Post> $list = guard $r->posts->find()->withAuthor()->withComments()->published()->get();
     assert($r->log->count() == 3);
-    assert($r->log->entries[1]->statement->text == 'SELECT `users`.`id`, `users`.`email`, `users`.`name`, `users`.`admin`, `users`.`created_at`, `users`.`updated_at` FROM `users` WHERE `users`.`id` IN (?, ?)');
-    assert($r->log->entries[2]->statement->text == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?, ?, ?)');
+    assert($r->log->entries()[1]->statement->text == 'SELECT `users`.`id`, `users`.`email`, `users`.`name`, `users`.`admin`, `users`.`created_at`, `users`.`updated_at` FROM `users` WHERE `users`.`id` IN (?, ?)');
+    assert($r->log->entries()[2]->statement->text == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?, ?, ?)');
     User $a = guard $list[0]->author->get();
     User $b = guard $list[1]->author->get();
     assert($a->name == 'mario' && $b->name == 'boris');
@@ -190,7 +190,7 @@ test nested_relations_cost_one_query_per_level
         return $q->published()->withComments();
     })->get();
     assert($r->log->count() == 3);
-    assert($r->log->entries[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) AND `posts`.`status` = ? AND `posts`.`deleted_at` IS NULL'));
+    assert($r->log->entries()[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) AND `posts`.`status` = ? AND `posts`.`deleted_at` IS NULL'));
     assert($r->fake->last() == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?, ?)');
     const array<Post>& $mine = $users[0]->posts->get();
     assert($mine->count() == 2);
@@ -229,7 +229,7 @@ test callbacks_shape_each_level
             return $c->oldest();
         });
     })->get();
-    assert($r->log->entries[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) ORDER BY `posts`.`created_at` DESC'));
+    assert($r->log->entries()[1]->statement->text == posts(' WHERE `posts`.`author_id` IN (?) ORDER BY `posts`.`created_at` DESC'));
     assert($r->fake->last() == 'SELECT `comments`.`id`, `comments`.`post_id`, `comments`.`body`, `comments`.`created_at` FROM `comments` WHERE `comments`.`post_id` IN (?) ORDER BY `comments`.`created_at` ASC');
 }
 
@@ -251,7 +251,7 @@ test a_transaction_rolls_back_on_a_duplicate
 {
     $r = Rig();
     $r->fake->written($insertId: 1)->fails(.driver(carbon::Failure(.duplicate, 'Duplicate entry', '23000', 1062)));
-    Db $db = $r->db;
+    DB $db = $r->db;
     status<Error> $s = $db->session()->transaction(function[$db]() : status<Error> {
         UserRepository $users = guard $db->session()->repo<UserRepository>() else ($e) { return .error($e); }
         User $u = guard $users->create(User($email: 'a@x.ch', $name: 'A')) else ($e) { return .error($e); }

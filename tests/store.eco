@@ -1,4 +1,5 @@
-use carbon::{Error, Event, Db};
+use carbon::{Error, Event, DB};
+use std::time;
 use carbon::fake;
 use hydrahon::{Value, DateTime, Postgres};
 use fixtures::{World, Note, Tag, Setting, Mood, NoteRepository, ProfileRepository, DraftRepository, TagRepository, Trail, noteRow, tagRow, failure, message, selectNotes};
@@ -89,12 +90,23 @@ test create_reads_the_key_through_returning_on_postgres
 {
     $fake = fake::Driver<Postgres>();
     $fake->rows([[Value::from(77)]]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     guard $db->register<NoteRepository>();
     NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
     Note $n = guard $notes->create(Note($title: 'Pg'));
     assert($n->id == 77);
     assert($fake->last() == 'INSERT INTO "notes" ("title", "pinned", "mood", "body", "created_at", "updated_at", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id"');
+}
+
+test returning_reads_an_unsigned_key_too
+{
+    $fake = fake::Driver<Postgres>();
+    $fake->rows([[Value::uint(78)]]);
+    DB $db = DB($fake);
+    guard $db->register<NoteRepository>();
+    NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
+    Note $n = guard $notes->create(Note($title: 'Pg'));
+    assert($n->id == 78);
 }
 
 test an_assigned_key_is_written_and_kept
@@ -149,11 +161,11 @@ test a_hand_built_model_is_detached_until_attached
 }
 
 /**
- * A note loaded through a Db, and so a repository, that is gone once this returns.
+ * A note loaded through a DB, and so a repository, that is gone once this returns.
  */
 function orphan(fake::Driver<hydrahon::Mysql> $fake) : Note
 {
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     guard $db->register<NoteRepository>();
     NoteRepository $notes = guard $db->session()->repo<NoteRepository>();
     Note $n = guard $notes->find()->one(1);
@@ -207,7 +219,7 @@ test create_refuses_a_stored_model
 
 test a_registered_repository_is_built_for_each_use
 {
-    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    DB $db = DB(fake::Driver<hydrahon::Mysql>());
     assert(!$db->has<NoteRepository>());
     guard $db->register<NoteRepository>();
     assert($db->has<NoteRepository>());
@@ -221,7 +233,7 @@ test a_registered_repository_is_built_for_each_use
 
 test what_a_factory_captures_every_repository_shares
 {
-    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    DB $db = DB(fake::Driver<hydrahon::Mysql>());
     Trail $trail = Trail();
     guard $db->register<NoteRepository>(function[$trail](carbon::Session $s) : NoteRepository {
         return NoteRepository($s, $trail, fixtures::NoteFlags());
@@ -234,28 +246,32 @@ test what_a_factory_captures_every_repository_shares
 
 test registering_a_type_twice_is_refused
 {
-    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    DB $db = DB(fake::Driver<hydrahon::Mysql>());
     guard $db->register<NoteRepository>();
     status<Error> $again = $db->register<NoteRepository>();
-    assert(message($again) == 'a repository of this type is registered on the Db already');
+    assert(message($again) == 'a repository of this type is registered on the DB already');
 }
 
 test asking_for_an_unregistered_repository_is_an_error
 {
-    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    DB $db = DB(fake::Driver<hydrahon::Mysql>());
     result<NoteRepository, Error> $none = $db->session()->repo<NoteRepository>();
-    assert(str::from($none->failure()) == 'the repository asked for is not registered on the Db');
+    assert(str::from($none->failure()) == 'the repository asked for is not registered on the DB');
 }
 
 test the_wiring_check_names_the_repository_left_out
 {
-    Db $db = Db(fake::Driver<hydrahon::Mysql>());
+    DB $db = DB(fake::Driver<hydrahon::Mysql>());
     guard $db->register<NoteRepository>();
-    guard $db->register<ProfileRepository>();
     guard $db->register<DraftRepository>();
-    // notes load their tags, so the tag repository is needed too
+    guard $db->register<fixtures::KitRepository>();
+    guard $db->register<fixtures::ShiftRepository>();
+    // notes load their tags, so the tag repository is needed too; every one left out is named
     status<Error> $s = fixtures::Carbon::check($db);
-    assert(message($s) == 'fixtures::TagRepository is not registered on the Db');
+    assert(message($s) == 'fixtures::TagRepository, fixtures::ProfileRepository is not registered on the DB');
+    guard $db->register<ProfileRepository>();
+    status<Error> $one = fixtures::Carbon::check($db);
+    assert(message($one) == 'fixtures::TagRepository is not registered on the DB');
     guard $db->register<TagRepository>();
     guard fixtures::Carbon::check($db);
 }
@@ -265,7 +281,7 @@ test delete_is_soft_and_restore_brings_it_back
     $w = World();
     $w->fake->rows([noteRow(4, 'Bin')])->written(1)->written(1);
     Note $n = guard $w->notes->find()->one(4);
-    $w->clock->advance(60);
+    $w->clock->advance(time::duration::secs(60));
     guard $n->delete();
     assert($n->deletedAt != null);
     assert($w->fake->last() == 'UPDATE `notes` SET `updated_at` = ?, `deleted_at` = ? WHERE `notes`.`id` = ?');
@@ -348,7 +364,7 @@ class Watcher : carbon::Observer<Note>
 test hooks_run_inside_out_and_can_refuse
 {
     $w = World();
-    $w->notes->observe(Watcher($w->notes->trail));
+    $w->db->observe<Note>(Watcher($w->notes->trail));
     $w->fake->written($insertId: 1)->written(1);
     Note $n = guard $w->notes->create(Note($title: 'Watched'));
     assert(($n->body ?? '') == 'filled');
@@ -400,7 +416,7 @@ test a_model_read_without_its_repository_cannot_write
 {
     carbon::fake::Driver<hydrahon::Mysql> $fake = carbon::fake::Driver<hydrahon::Mysql>();
     $fake->rows([tagRow(1, 1, 'x')]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     // reading needs no repository; the models link to the session all the same
     fixtures::TagQuery $q = fixtures::TagQuery($db->session());
     array<Tag> $read = guard $q->get();
@@ -408,5 +424,5 @@ test a_model_read_without_its_repository_cannot_write
     assert($t->link->attached());
     $t->name = 'y';
     status<Error> $s = $t->save();
-    assert(message($s) == 'the repository asked for is not registered on the Db');
+    assert(message($s) == 'the repository asked for is not registered on the DB');
 }

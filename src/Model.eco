@@ -36,9 +36,7 @@ public interface Model<M, R>
      */
     function save() : status<Error>
     {
-        // bound first: a chained $this->link()->repo() never gets its type in a default
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else ($e) { return .error($e); }
+        R $r = guard $this->link()->bound<R>() else ($e) { return .error($e); }
         return $r->save($this);
     }
 
@@ -47,8 +45,7 @@ public interface Model<M, R>
      */
     function delete() : status<Error>
     {
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else ($e) { return .error($e); }
+        R $r = guard $this->link()->bound<R>() else ($e) { return .error($e); }
         return $r->delete($this);
     }
 
@@ -57,8 +54,7 @@ public interface Model<M, R>
      */
     function restore() : status<Error>
     {
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else ($e) { return .error($e); }
+        R $r = guard $this->link()->bound<R>() else ($e) { return .error($e); }
         return $r->restore($this);
     }
 
@@ -67,8 +63,7 @@ public interface Model<M, R>
      */
     function purge() : status<Error>
     {
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else ($e) { return .error($e); }
+        R $r = guard $this->link()->bound<R>() else ($e) { return .error($e); }
         return $r->purge($this);
     }
 
@@ -77,8 +72,7 @@ public interface Model<M, R>
      */
     function fresh() : result<M, Error>
     {
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else ($e) { return .error($e); }
+        R $r = guard $this->link()->bound<R>() else ($e) { return .error($e); }
         return $r->fresh($this);
     }
 
@@ -88,8 +82,7 @@ public interface Model<M, R>
      */
     function dirty() : bool
     {
-        Link& $l = $this->link();
-        R $r = guard $l->bound<R>() else { return false; }
+        R $r = guard $this->link()->bound<R>() else { return false; }
         return $r->dirty($this);
     }
 
@@ -98,7 +91,6 @@ public interface Model<M, R>
      */
     function persisted() : bool
     {
-        Link& $l = $this->link();
-        return $l->persisted();
+        return $this->link()->persisted();
     }
 }

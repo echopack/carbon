@@ -1,19 +1,28 @@
 namespace carbon::mysql;
 
 /**
- * carbon on MySQL or MariaDB, over one libmysql connection.
+ * carbon on MySQL or MariaDB, over one libmysql connection: a script's, or one a session
+ * borrowed from a `Source`.
  *
  * ```echo
  * carbon::mysql::Driver $driver = guard carbon::mysql::Driver::open('mysql://root@127.0.0.1/blog');
- * carbon::Db $db = carbon::Db($driver);
+ * carbon::DB $db = carbon::DB($driver);
  * guard $db->register<PostRepository>();
  * ```
+ *
+ * A `DB` on one driver has one connection for every session; an app that serves requests gives
+ * it a `Source` instead.
  */
 public class Driver : carbon::Driver
 {
     public mysql::Connection $connection;
     internal hydrahon::Mysql $dialect;
     internal mysql::Transaction? $open = null;
+
+    /**
+     * The pool's lease when the connection is borrowed: dropping the driver gives it back.
+     */
+    internal mysql::Lease? $lease = null;
 
     /**
      * Whether the connection counts the rows an UPDATE matched (`foundRows`), so carbon can tell
@@ -35,6 +44,17 @@ public class Driver : carbon::Driver
     {
         $this->connection = $connection;
         $this->dialect = $dialect;
+    }
+
+    /**
+     * On a connection borrowed from a `Source`'s pool, which always counts matched rows.
+     */
+    internal constructor(lease: mysql::Lease $lease, hydrahon::Mysql $dialect)
+    {
+        $this->connection = $lease->db();
+        $this->dialect = $dialect;
+        $this->lease = $lease;
+        $this->matched = true;
     }
 
     /**
@@ -113,7 +133,7 @@ public class Driver : carbon::Driver
 
     public function commit() : status<Error>
     {
-        mysql::Transaction $t = guard $this->open else { return .error(.missing); }
+        mysql::Transaction $t = guard $this->open else { return .error(.invalid('no transaction is open')); }
         $this->open = null;
         guard $t->commit() else ($e) { return .error(Driver::failure($e)); }
         return .ok();
@@ -121,7 +141,7 @@ public class Driver : carbon::Driver
 
     public function rollback() : status<Error>
     {
-        mysql::Transaction $t = guard $this->open else { return .error(.missing); }
+        mysql::Transaction $t = guard $this->open else { return .error(.invalid('no transaction is open')); }
         $this->open = null;
         guard $t->rollback() else ($e) { return .error(Driver::failure($e)); }
         return .ok();
@@ -156,6 +176,9 @@ public class Driver : carbon::Driver
             },
             mysql::Error::timeout => {
                 $fault = .connection;
+            },
+            mysql::Error::exhausted => {
+                $fault = .exhausted;
             },
             else => {
             },

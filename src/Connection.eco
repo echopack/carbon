@@ -4,15 +4,22 @@ use std::time;
 use carbon::listen::Ran;
 
 /**
- * What sessions run on: the driver, the clock timestamps come from, the listeners that hear
- * about every statement, the open transaction and how to undo what it wrote into models. A `Db`
- * owns one. Nothing in carbon is global.
+ * One session's way to the database: the connection it opened from the `DB`'s source, its open
+ * transaction and how to undo what that transaction wrote into models. Every session has its
+ * own, so a transaction, and what its rollback puts back, is that session's alone. It opens its
+ * connection with the first statement it runs and lets go of it with the session. The clock,
+ * the listeners and the names of other databases are the `DB`'s, shared by every session.
+ * Nothing in carbon is global.
  */
 public class Connection
 {
-    public Driver $driver;
-    public Clock $clock;
-    internal array<Listener> $listeners = [];
+    public calendar::Clock $clock;
+    internal Engine $engine;
+
+    /**
+     * The connection this session runs on, null until its first statement opens one.
+     */
+    internal Driver? $driver = null;
     internal bool $open = false;
 
     /**
@@ -20,29 +27,42 @@ public class Connection
      * writes ran. A rollback runs it backwards; a commit forgets it.
      */
     internal array<function<void()>> $undo = [];
-    internal map<string, string> $schemas = [];
 
-    public constructor(Driver $driver)
+    /**
+     * A connection of its own on `$driver`, outside any `DB`.
+     */
+    public constructor(Driver $driver, clock: calendar::Clock $clock = calendar::SystemClock())
     {
-        $this->driver = $driver;
-        $this->clock = carbon::clock::System();
+        $this->engine = Engine(Single($driver), $clock);
+        $this->clock = $clock;
     }
 
-    public constructor(Driver $driver, clock: Clock $clock)
+    internal constructor(Engine $engine)
     {
-        $this->driver = $driver;
-        $this->clock = $clock;
+        $this->engine = $engine;
+        $this->clock = $engine->clock;
+    }
+
+    /**
+     * What the clock says, to the second: the instant a DATETIME column without fractional
+     * seconds gives back, and what created, updated and deleted columns are stamped with.
+     */
+    public const function now() : time::timestamp
+    {
+        return Temporal::second($this->clock->now());
     }
 
     /**
      * Name the databases (schemas) the app reaches besides the connection's own, so a query can
      * join a table there without knowing where it is deployed:
      * `$db->schema('cache', 'movies_cache_prod')`, then
-     * `MovieCountsTable::alias('c', schema: $q->connection()->schema('cache'))`.
+     * `MovieCountsTable::alias('c', schema: $q->connection()->schema('cache'))`. The names are
+     * the `DB`'s: every session sees them.
      */
     public function schema(const string& $name, const string& $actual) : void
     {
-        $this->schemas[$name] = $actual;
+        $this->engine->seal->refuse('naming a schema');
+        $this->engine->schemas[$name] = $actual;
     }
 
     /**
@@ -50,19 +70,28 @@ public class Connection
      */
     public const function schema(const string& $name) : string?
     {
-        if (!$this->schemas->has($name)) {
+        if (!$this->engine->schemas->has($name)) {
             return null;
         }
-        string $actual = $this->schemas->get($name);
+        string $actual = $this->engine->schemas->get($name);
         return $actual;
     }
 
     /**
-     * Tell `$listener` about every statement from now on.
+     * Tell `$listener` about every statement of every session from now on.
      */
     public function listen(Listener $listener) : void
     {
-        $this->listeners[] = $listener;
+        $this->engine->seal->refuse('adding a listener');
+        $this->engine->listeners[] = $listener;
+    }
+
+    /**
+     * What the source's connections can do.
+     */
+    public const function traits() : Traits
+    {
+        return $this->engine->source->traits();
     }
 
     /**
@@ -70,7 +99,8 @@ public class Connection
      */
     public function query(const hydrahon::Select& $q) : result<Cursor, Error>
     {
-        return $this->fetch($this->driver->render($q));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->fetch($d, $d->render($q));
     }
 
     /**
@@ -78,22 +108,26 @@ public class Connection
      */
     public function query(const hydrahon::Insert& $q) : result<Cursor, Error>
     {
-        return $this->fetch($this->driver->render($q));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->fetch($d, $d->render($q));
     }
 
     public function exec(const hydrahon::Insert& $q) : result<Written, Error>
     {
-        return $this->write($this->driver->render($q));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->write($d, $d->render($q));
     }
 
     public function exec(const hydrahon::Update& $q) : result<Written, Error>
     {
-        return $this->write($this->driver->render($q));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->write($d, $d->render($q));
     }
 
     public function exec(const hydrahon::Delete& $q) : result<Written, Error>
     {
-        return $this->write($this->driver->render($q));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->write($d, $d->render($q));
     }
 
     /**
@@ -117,7 +151,7 @@ public class Connection
      * rolled back when it fails.
      *
      * ```echo
-     * User $carol = guard $db->transaction(function[$users, $posts]() : result<User, carbon::Error> {
+     * User $carol = guard $session->transaction(function[$users, $posts]() : result<User, carbon::Error> {
      *     User $u = guard $users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
      *     guard $posts->create(Post($authorId: $u->id, $title: 'Hello')) else ($e) { return .error($e); }
      *     return .ok($u);
@@ -151,7 +185,17 @@ public class Connection
      */
     public function run(const string& $sql) : result<Written, Error>
     {
-        return $this->write(Statement(plain: $sql));
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->write($d, Statement(plain: $sql));
+    }
+
+    /**
+     * Run `$sql` as it is, without parameters, for the rows it answers with.
+     */
+    internal function ask(const string& $sql) : result<Cursor, Error>
+    {
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
+        return $this->fetch($d, Statement(plain: $sql));
     }
 
     /**
@@ -160,6 +204,22 @@ public class Connection
     public const function inTransaction() : bool
     {
         return $this->open;
+    }
+
+    /**
+     * The connection, opened from the source the first time it is needed and kept from then on.
+     */
+    internal function lease() : result<Driver, Error>
+    {
+        // bound first: a value compared with null where it is made is never let go of
+        Driver? $held = $this->driver;
+        if ($held != null) {
+            Driver $d = guard $held;
+            return .ok($d);
+        }
+        Driver $d = guard $this->engine->source->open() else ($e) { return .error($e); }
+        $this->driver = $d;
+        return .ok($d);
     }
 
     internal function begin() : status<Error>
@@ -218,41 +278,42 @@ public class Connection
         $this->undo = [];
     }
 
-    internal function fetch(result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Cursor, Error>
+    internal function fetch(Driver $d, result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Cursor, Error>
     {
         hydrahon::Sql $sql = guard $rendered else ($e) { return .error(.render($e)); }
-        return $this->fetch(Statement($sql));
+        return $this->fetch($d, Statement($sql));
     }
 
-    internal function write(result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Written, Error>
+    internal function write(Driver $d, result<hydrahon::Sql, hydrahon::Error> $rendered) : result<Written, Error>
     {
         hydrahon::Sql $sql = guard $rendered else ($e) { return .error(.render($e)); }
-        return $this->write(Statement($sql));
+        return $this->write($d, Statement($sql));
     }
 
-    internal function fetch(const Statement& $s) : result<Cursor, Error>
+    internal function fetch(Driver $d, const Statement& $s) : result<Cursor, Error>
     {
         time::instant $start = time::instant::now();
-        result<Cursor, Error> $r = $this->driver->query($s);
+        result<Cursor, Error> $r = $d->query($s);
         $this->tell($s, $start, $r->failed());
         return $r;
     }
 
-    internal function write(const Statement& $s) : result<Written, Error>
+    internal function write(Driver $d, const Statement& $s) : result<Written, Error>
     {
         time::instant $start = time::instant::now();
-        result<Written, Error> $r = $this->driver->exec($s);
+        result<Written, Error> $r = $d->exec($s);
         $this->tell($s, $start, $r->failed());
         return $r;
     }
 
     internal function control(Control $step) : status<Error>
     {
+        Driver $d = guard $this->lease() else ($e) { return .error($e); }
         time::instant $start = time::instant::now();
         status<Error> $r = match ($step) {
-            Control::begin => $this->driver->begin(),
-            Control::commit => $this->driver->commit(),
-            Control::rollback => $this->driver->rollback(),
+            Control::begin => $d->begin(),
+            Control::commit => $d->commit(),
+            Control::rollback => $d->rollback(),
         };
         $this->tell($step->statement(), $start, $r->failed());
         return $r;
@@ -260,11 +321,11 @@ public class Connection
 
     internal function tell(const Statement& $s, time::instant $start, bool $failed) : void
     {
-        if ($this->listeners->count() == 0) {
+        if ($this->engine->listeners->count() == 0) {
             return;
         }
         Ran $event = Ran($s, $start->elapsed(), $failed);
-        foreach ($this->listeners as &$l) {
+        foreach ($this->engine->listeners as &$l) {
             $l->ran($event);
         }
     }

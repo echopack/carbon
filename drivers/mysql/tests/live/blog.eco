@@ -1,9 +1,10 @@
-use blog::{Tables, UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostQuery, CommentQuery};
-use carbon::{Db, Error};
+use blog::{UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostQuery, CommentQuery};
+use carbon::{DB, Error, Migrator};
 use carbon::mysql::Driver;
 use carbon::listen::Log;
-use carbon::clock;
+use std::time;
 use std::env;
+use std::thread;
 
 /**
  * A blog on the server in CARBON_MYSQL_URL, with fresh tables, a log and a clock that only
@@ -11,12 +12,12 @@ use std::env;
  */
 class Live
 {
-    public Db $db;
+    public DB $db;
     public UserRepository $users;
     public PostRepository $posts;
     public CommentRepository $comments;
     public Log $log;
-    public clock::Fixed $clock;
+    public calendar::ManualClock $clock;
 
     public constructor()
     {
@@ -24,11 +25,11 @@ class Live
         assert(!$url->empty());
         Driver $driver = guard Driver::open($url) else ($e) { die("connect: {$e}"); }
         $this->log = Log();
-        $this->clock = clock::Fixed(unix: 1700000000);
-        $this->db = Db($driver, clock: $this->clock);
-        foreach (Tables::recreate() as const &$sql) {
-            guard $this->db->run($sql) else ($e) { die("{$sql}: {$e}"); }
-        }
+        $this->clock = calendar::ManualClock(time::timestamp::from_unix_secs(1700000000));
+        $this->db = DB($driver, clock: $this->clock);
+        Migrator $migrator = Migrator($this->db, blog::Carbon::migrations(), carbon::ddl::Mysql());
+        guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+        guard $migrator->up() else ($e) { die("migrate: {$e}"); }
         $this->db->listen($this->log);
         guard $this->db->register<UserRepository>();
         guard $this->db->register<PostRepository>();
@@ -65,11 +66,11 @@ test live_blog_tour
     array<Post> $mine = [];
     array<string> $titles = ['Typed SQL', 'Weak links', 'Draft ideas'];
     foreach ($titles as const &$t) {
-        $live->clock->advance(60);
+        $live->clock->advance(time::duration::secs(60));
         Post $p = guard $b->posts->create(Post($authorId: $mario->id, $title: $t, $tags: ['echo', 'carbon']));
         $mine[] = $p;
     }
-    $live->clock->advance(60);
+    $live->clock->advance(time::duration::secs(60));
     Post $theirs = guard $b->posts->create(Post($authorId: $boris->id, $title: 'Hello from Boris', $body: 'hi', $views: 70000));
     guard $b->posts->publish($mine[0]);
     guard $b->posts->publish($mine[1]);
@@ -267,4 +268,133 @@ test live_models_follow_the_database
     assert($carol->persisted() && $carol->id > 0);
     uint64 $users = guard $b->users->count();
     assert($users == 2);
+}
+
+test live_sessions_take_connections_of_their_own
+{
+    string $url = string::from(env::var('CARBON_MYSQL_URL') ?? '');
+    assert(!$url->empty());
+    carbon::mysql::Source $source = guard carbon::mysql::Source::parse($url) else ($e) { die("connect: {$e}"); }
+    DB $db = DB($source);
+    Migrator $migrator = Migrator($db, blog::Carbon::migrations(), carbon::ddl::Mysql());
+    guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+    guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+    guard $db->register<UserRepository>();
+    guard $db->register<PostRepository>();
+    guard $db->register<CommentRepository>();
+    guard blog::Carbon::check($db);
+    carbon::Session $a = $db->scoped();
+    carbon::Session $b = $db->scoped();
+    UserRepository $ua = guard $a->repo<UserRepository>();
+    UserRepository $ub = guard $b->repo<UserRepository>();
+    status<Error> $s = $a->transaction(function[$ua, $ub]() : status<Error> {
+        guard $ua->create(User($email: 'a@example.com', $name: 'A')) else ($e) { return .error($e); }
+        // the other session is on a connection of its own: it neither sees the open transaction
+        // nor ends up in it
+        uint64 $seen = guard $ub->count() else ($e) { return .error($e); }
+        assert($seen == 0);
+        guard $ub->create(User($email: 'b@example.com', $name: 'B')) else ($e) { return .error($e); }
+        return .error(.invalid('roll back'));
+    });
+    assert($s->failed());
+    uint64 $left = guard $ua->count();
+    assert($left == 1);
+    User $kept = guard $ua->find()->one();
+    assert($kept->email == 'b@example.com');
+    // the root session, a and b each hold one
+    assert($source->pool->open() == 3);
+}
+
+/**
+ * A sealed blog on a pool of `$max` connections, with fresh tables.
+ */
+internal function pooled(usize $max) : DB
+{
+    string $url = string::from(env::var('CARBON_MYSQL_URL') ?? '');
+    assert(!$url->empty());
+    mysql::Options $o = guard mysql::Options::parse($url) else ($e) { die("url: {$e}"); }
+    carbon::mysql::Source $source = carbon::mysql::Source($o, mysql::PoolOptions($max: $max));
+    DB $db = DB($source);
+    Migrator $migrator = Migrator($db, blog::Carbon::migrations(), carbon::ddl::Mysql());
+    guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+    guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+    guard $db->register<UserRepository>();
+    guard $db->register<PostRepository>();
+    guard $db->register<CommentRepository>();
+    guard blog::Carbon::check($db);
+    $db->seal();
+    return $db;
+}
+
+test live_a_sealed_db_shared_by_sixteen_threads
+{
+    DB $db = pooled(4);
+    array<thread::task<int64>> $workers = array<thread::task<int64>>();
+    foreach (0 .. 16 as $w) {
+        int64 $who = $w as int64;
+        thread::task<int64> $t = guard thread::spawn(function() : int64 {
+            int64 $made = 0;
+            foreach (0 .. 20 as $n) {
+                // a session per unit of work, so its connection goes back to the pool after it
+                carbon::Session $s = $db->scoped();
+                UserRepository $users = guard $s->repo<UserRepository>();
+                User $u = guard $users->create(User($email: "u{$who}-{$n}@example.com", $name: "U{$who}"));
+                User? $back = guard $users->get($u->id);
+                if ($back != null) {
+                    $made = $made + 1;
+                }
+            }
+            return $made;
+        }) else ($e) {
+            die($e->message());
+        }
+        $workers->push($t);
+    }
+    int64 $total = 0;
+    foreach ($workers as &$t) {
+        $total = $total + $t->wait();
+    }
+    assert($total == 320);
+    UserRepository $all = guard $db->scoped()->repo<UserRepository>();
+    uint64 $count = guard $all->count();
+    assert($count == 320);
+}
+
+test live_a_deadlock_between_two_threads_is_retryable
+{
+    DB $db = pooled(4);
+    UserRepository $setup = guard $db->scoped()->repo<UserRepository>();
+    User $a = guard $setup->create(User($email: 'a@example.com', $name: 'A'));
+    User $b = guard $setup->create(User($email: 'b@example.com', $name: 'B'));
+    int64 $ida = $a->id;
+    int64 $idb = $b->id;
+    // each locks one row, then wants the other's: InnoDB picks one of the two as the victim
+    thread::task<bool> $one = guard thread::spawn(function() : bool {
+        carbon::Session $s = $db->scoped();
+        status<Error> $r = $s->transaction(function[$s, $ida, $idb]() : status<Error> {
+            guard $s->connection()->run("UPDATE users SET name = 'one' WHERE id = {$ida}") else ($e) { return .error($e); }
+            thread::sleep(300);
+            guard $s->connection()->run("UPDATE users SET name = 'one' WHERE id = {$idb}") else ($e) { return .error($e); }
+            return .ok();
+        });
+        return $r->failed() && $r->failure()->retryable();
+    }) else ($e) {
+        die($e->message());
+    }
+    thread::task<bool> $two = guard thread::spawn(function() : bool {
+        carbon::Session $s = $db->scoped();
+        status<Error> $r = $s->transaction(function[$s, $ida, $idb]() : status<Error> {
+            guard $s->connection()->run("UPDATE users SET name = 'two' WHERE id = {$idb}") else ($e) { return .error($e); }
+            thread::sleep(300);
+            guard $s->connection()->run("UPDATE users SET name = 'two' WHERE id = {$ida}") else ($e) { return .error($e); }
+            return .ok();
+        });
+        return $r->failed() && $r->failure()->retryable();
+    }) else ($e) {
+        die($e->message());
+    }
+    bool $first = $one->wait();
+    bool $second = $two->wait();
+    // exactly one of them was the victim
+    assert($first != $second);
 }

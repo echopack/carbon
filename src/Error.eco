@@ -65,16 +65,50 @@ public enum Error
     case stale;
 
     /**
-     * What the app asked for or a relation needs is not registered on the `Db`: `$what` names
+     * What the app asked for or a relation needs is not registered on the `DB`: `$what` names
      * it. A repository left out is a wiring mistake; the generated `Carbon::check($db)` finds
      * every one of them at startup.
      */
     case unregistered(string $what);
 
     /**
-     * `$what` is registered on the `Db` already; each type is registered once.
+     * `$what` is registered on the `DB` already; each type is registered once.
      */
     case registered(string $what);
+
+    /**
+     * The `DB` has one connection, and another session has a transaction open on it: the
+     * statement would have run inside that transaction. Give the `DB` a `Source` that opens a
+     * connection per session.
+     */
+    case busy;
+
+    /**
+     * The `DB` is sealed: its wiring is done, so nothing more is registered on it.
+     */
+    case sealed;
+
+    /**
+     * A `Migrator` was asked to roll back a batch holding migration `$id`, which has no `down`.
+     * Nothing ran.
+     */
+    case irreversible(string $id);
+
+    /**
+     * The batch to roll back holds migrations the app has no class for, `$ids`: written by
+     * another version of the app. Nothing ran.
+     */
+    case unknown(string $ids);
+
+    /**
+     * Another migrator held the database's lock for migrations for as long as this one waited.
+     */
+    case locked;
+
+    /**
+     * Migration `$id` failed, with why.
+     */
+    case migration(string $id, string $message);
 
     /**
      * Whether a unique key refused the write.
@@ -152,10 +186,28 @@ public function from(const carbon::Error& $e) : string
             return 'the row is gone or changed since the model was loaded';
         },
         carbon::Error::unregistered($what) => {
-            return "{$what} is not registered on the Db";
+            return "{$what} is not registered on the DB";
         },
         carbon::Error::registered($what) => {
-            return "{$what} is registered on the Db already";
+            return "{$what} is registered on the DB already";
+        },
+        carbon::Error::busy => {
+            return 'another session has a transaction open on the one connection';
+        },
+        carbon::Error::sealed => {
+            return 'the DB is sealed; register everything before seal()';
+        },
+        carbon::Error::irreversible($id) => {
+            return "migration {$id} has no down(), so its batch cannot be rolled back";
+        },
+        carbon::Error::unknown($ids) => {
+            return "the batch to roll back holds migrations this app does not have: {$ids}";
+        },
+        carbon::Error::locked => {
+            return 'another migrator is running';
+        },
+        carbon::Error::migration($id, $message) => {
+            return "migration {$id}: {$message}";
         },
     };
     return '';

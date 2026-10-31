@@ -1,0 +1,33 @@
+namespace fixtures;
+
+use std::time;
+
+/**
+ * Every time type carbon maps: an instant stamped on create, a wall clock stamped on every
+ * write, an instant soft delete and calendar dates. Repository and query written by carbongen.
+ */
+#[carbon::model: 'shifts']
+public class Shift : carbon::Model<Shift, ShiftRepository>
+{
+    public carbon::Link $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+    public calendar::Date $day;
+    public calendar::Date? $until = null;
+    public calendar::DateTime? $starts = null;
+
+    #[carbon::created]
+    public time::timestamp? $createdAt = null;
+
+    #[carbon::updated]
+    public calendar::DateTime? $updatedAt = null;
+
+    #[carbon::deleted]
+    public time::timestamp? $deletedAt = null;
+
+    public function link() : carbon::Link&
+    {
+        return $this->link;
+    }
+}

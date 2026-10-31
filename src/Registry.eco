@@ -1,17 +1,21 @@
 namespace carbon;
 
 /**
- * What a `Db` and every session made from it share: how to build each registered repository,
- * and the store of every model. Sessions hold it rather than the `Db`, so the `Db` can keep its
+ * What a `DB` and every session made from it share: how to build each registered repository,
+ * the observers of every model and the store of every model. Sessions hold it rather than the `DB`, so the `DB` can keep its
  * root session without either keeping the other alive.
  */
+#[atomic]
 internal class Registry
 {
     internal map<type_id, erased> $factories = [];
     internal map<type_id, erased> $stores = [];
+    internal map<type_id, erased> $observers = [];
+    internal Seal $seal;
 
-    internal constructor()
+    internal constructor(Seal $seal)
     {
+        $this->seal = $seal;
     }
 
     internal const function has(type_id $id) : bool
@@ -48,13 +52,17 @@ internal class Registry
     }
 
     /**
-     * The one store of model `M`, made the first time it is asked for.
+     * The one store of model `M`, made the first time it is asked for. Once the `DB` is sealed
+     * the maps are only read, so every store has to be made before: `Carbon::check` makes them.
      */
     internal function store<M, K, S>() : Store<M, K, S>
     {
         type_id $id = type_id<Store<M, K, S>>();
         if (!$this->stores->has($id)) {
-            $this->stores[$id] = erased::from(Held<Store<M, K, S>>(Store<M, K, S>()));
+            if ($this->seal->on) {
+                die('carbon: a store was asked for after seal(); make every store first, which Carbon::check($db) does');
+            }
+            $this->stores[$id] = erased::from(Held<Store<M, K, S>>(Store<M, K, S>($this->observers<M>(), $this->seal)));
         }
         erased $held = $this->stores->get($id);
         Held<Store<M, K, S>> $entry;
@@ -64,11 +72,32 @@ internal class Registry
         }
         return $entry->value;
     }
+
+    /**
+     * The observers of model `M`, one list whatever store reads it.
+     */
+    internal function observers<M>() : Held<array<Observer<M>>>
+    {
+        type_id $id = type_id<M>();
+        if (!$this->observers->has($id)) {
+            $this->seal->refuse('observing a model');
+            array<Observer<M>> $none = [];
+            $this->observers[$id] = erased::from(Held<array<Observer<M>>>($none));
+        }
+        erased $held = $this->observers->get($id);
+        Held<array<Observer<M>>> $entry;
+        // sound: only this method writes the key, always with this type
+        unsafe {
+            $entry = assume<Held<array<Observer<M>>>>($held);
+        }
+        return $entry;
+    }
 }
 
 /**
  * A value as the registry keeps it, behind an erased handle keyed by its type.
  */
+#[atomic]
 internal class Held<T>
 {
     internal T $value;

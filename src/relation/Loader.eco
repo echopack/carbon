@@ -1,0 +1,237 @@
+namespace carbon::relation;
+
+/**
+ * Which way a relation points.
+ */
+public enum Kind : uint8
+{
+    /**
+     * The model holds the related model's key: a post's author.
+     */
+    case belongsTo = 0;
+
+    /**
+     * The related model holds this model's key, and there is at most one: a user's profile.
+     */
+    case hasOne = 1;
+
+    /**
+     * The related model holds this model's key, and there are many: a post's comments.
+     */
+    case hasMany = 2;
+}
+
+/**
+ * The loader of one relation slot: it fills the slot of a batch of models `M` with related
+ * models `T`, read with one query through their query `Q` and repository `R`. `K` is the type of
+ * the key the two are matched on, `P` the related model's own key. carbongen builds one per
+ * relation from what tells the models apart: the key each model of the batch is matched on
+ * (`own`), the one each related model is matched by (`by`), the related model's own key (`key`),
+ * the condition that picks the related rows (`picks`) and how to fill the slot.
+ *
+ * A relation to one model reuses a model the load already holds instead of reading it again,
+ * but only while nothing narrows it: a model read for another relation had none of its
+ * conditions applied.
+ */
+public class Loader<M, T, K, P, Q, R>
+{
+    internal Kind $kind;
+    internal Fetch<T, Q, R> $fetch;
+    internal function<K?(M)> $own;
+    internal function<K?(T)> $by;
+    internal function<P(T)> $key;
+    internal function<hydrahon::Term<bool>(array<K>)> $picks;
+    internal function<void(M, T?)>? $set = null;
+    internal function<void(M, T)>? $share = null;
+    internal function<void(M, array<T>)>? $fill = null;
+
+    /**
+     * A relation to the model whose key `$own` reads off each model; `$set` fills the slot with
+     * a model read for it, `$share` with one the load already held.
+     */
+    public constructor(belongsTo: string $target, function<K?(M)> $own, function<K?(T)> $by, function<P(T)> $key, function<hydrahon::Term<bool>(array<K>)> $picks, function<void(M, T?)> $set, function<void(M, T)> $share)
+    {
+        $this->kind = .belongsTo;
+        $this->fetch = Fetch<T, Q, R>($target);
+        $this->own = $own;
+        $this->by = $by;
+        $this->key = $key;
+        $this->picks = $picks;
+        $this->set = $set;
+        $this->share = $share;
+    }
+
+    /**
+     * A relation to the one model whose `$by` holds each model's `$own`.
+     */
+    public constructor(hasOne: string $target, function<K?(M)> $own, function<K?(T)> $by, function<P(T)> $key, function<hydrahon::Term<bool>(array<K>)> $picks, function<void(M, T?)> $set, function<void(M, T)> $share)
+    {
+        $this->kind = .hasOne;
+        $this->fetch = Fetch<T, Q, R>($target);
+        $this->own = $own;
+        $this->by = $by;
+        $this->key = $key;
+        $this->picks = $picks;
+        $this->set = $set;
+        $this->share = $share;
+    }
+
+    /**
+     * A relation to every model whose `$by` holds each model's `$own`; `$fill` fills the slot.
+     */
+    public constructor(hasMany: string $target, function<K?(M)> $own, function<K?(T)> $by, function<P(T)> $key, function<hydrahon::Term<bool>(array<K>)> $picks, function<void(M, array<T>)> $fill)
+    {
+        $this->kind = .hasMany;
+        $this->fetch = Fetch<T, Q, R>($target);
+        $this->own = $own;
+        $this->by = $by;
+        $this->key = $key;
+        $this->picks = $picks;
+        $this->fill = $fill;
+    }
+
+    /**
+     * Start from `$base`, a query of the related model, for its conditions, order and scope.
+     */
+    public function from(Q $base) : void
+    {
+        $this->fetch->from(mv $base);
+    }
+
+    public function where(hydrahon::Term<bool> $condition) : void
+    {
+        $this->fetch->where(mv $condition);
+    }
+
+    /**
+     * Let `$constrain` change the related query before it runs: order, scope, its own scopes.
+     */
+    public function constrain(function<Q(Q)> $constrain) : void
+    {
+        $this->fetch->constrain(mv $constrain);
+    }
+
+    /**
+     * Load `$relation` for the related models too, with one more query.
+     */
+    public function with(carbon::Eager<T> $relation) : void
+    {
+        $this->fetch->with(mv $relation);
+    }
+
+    /**
+     * Fill the slot of every model in `$models` with one query in `$session`. `$seen` holds what
+     * the load handed out so far: the related models it reads go there, and a relation to one
+     * model shares a model it holds rather than reading a copy.
+     */
+    public function load(array<M>& $models, carbon::Session $session, carbon::Loaded $seen) : status<carbon::Error>
+    {
+        function<K?(M)> $own = $this->own;
+        function<K?(T)> $by = $this->by;
+        function<P(T)> $key = $this->key;
+        function<hydrahon::Term<bool>(array<K>)> $picks = $this->picks;
+        bool $belongs = $this->kind == Kind::belongsTo;
+        bool $one = $this->kind != Kind::hasMany;
+        // only a relation nothing narrows may hand out a model the load read for another
+        bool $reuse = $one && $this->fetch->plain();
+
+        // each model's key, read once for the query and again to fill its slot
+        array<K?> $owned = [];
+        Keys<K> $keys = Keys<K>();
+        foreach ($models as const &$m) {
+            // bound first: a value compared with null where it is made is never let go of
+            K? $mine = $own($m);
+            $owned[] = $mine;
+            if ($mine == null) {
+                continue;
+            }
+            K $k = guard $mine;
+            if ($belongs && $reuse) {
+                // a model this load holds already needs no row read again
+                T? $held = $seen->find<K, T>($k);
+                if ($held != null) {
+                    continue;
+                }
+            }
+            $keys->add($k);
+        }
+
+        array<T> $found = [];
+        if (!$keys->empty()) {
+            Q $q = guard $this->fetch->query($session, $picks($keys->list()), $seen) else ($e) { return .error($e); }
+            array<T> $rows = guard $q->get() else ($e) { return .error($e); }
+            $found = mv $rows;
+        }
+
+        // the related models by the key they match on: the ones read now, and for a has one
+        // relation that may reuse, the ones the load held already
+        Index<K, T> $read = Index<K, T>();
+        Index<K, T> $known = Index<K, T>();
+        foreach ($found as const &$f) {
+            K? $match = $by($f);
+            if ($match == null) {
+                // a related row with no key of a model: it belongs to none of the batch
+                continue;
+            }
+            K $k = guard $match;
+            P $pk = $key($f);
+            if (!$belongs && $reuse) {
+                T? $had = $seen->find<P, T>($pk);
+                if ($had != null) {
+                    T $h = guard $had;
+                    $known->add($k, $h);
+                    continue;
+                }
+            }
+            $read->add($k, $f);
+            // keeps the first one read: a model the load held already stays the one handed out
+            $seen->add<P, T>($pk, $f);
+        }
+
+        if (!$one) {
+            function<void(M, array<T>)> $fill = guard $this->fill;
+            foreach ($models as $i => const &$m) {
+                K? $mine = $owned[$i];
+                if ($mine == null) {
+                    array<T> $none = [];
+                    $fill($m, mv $none);
+                    continue;
+                }
+                K $k = guard $mine;
+                $fill($m, $read->all($k));
+            }
+            return .ok();
+        }
+
+        function<void(M, T?)> $set = guard $this->set;
+        function<void(M, T)> $share = guard $this->share;
+        foreach ($models as $i => const &$m) {
+            K? $mine = $owned[$i];
+            if ($mine == null) {
+                $set($m, null);
+                continue;
+            }
+            K $k = guard $mine;
+            T? $fresh = $read->first($k);
+            if ($fresh != null) {
+                $set($m, $fresh);
+                continue;
+            }
+            T? $shared = null;
+            if ($belongs) {
+                if ($reuse) {
+                    $shared = $seen->find<K, T>($k);
+                }
+            } else {
+                $shared = $known->first($k);
+            }
+            if ($shared != null) {
+                T $s = guard $shared;
+                $share($m, $s);
+            } else {
+                $set($m, null);
+            }
+        }
+        return .ok();
+    }
+}

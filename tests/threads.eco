@@ -1,0 +1,134 @@
+/*
+ * Threads: one sealed DB shared by many, each thread working in a session of its own on a
+ * connection of its own.
+ */
+
+use carbon::{DB, Error, Session};
+use carbon::fake;
+use hydrahon::Mysql;
+use fixtures::{Tag, TagRepository, NoteRepository, Note};
+use std::thread;
+
+internal function wired(carbon::Source $source) : DB
+{
+    DB $db = DB($source);
+    fixtures::Trail $trail = fixtures::Trail();
+    fixtures::NoteFlags $flags = fixtures::NoteFlags();
+    guard $db->register<NoteRepository>(function[$trail, $flags](Session $s) : NoteRepository {
+        return NoteRepository($s, $trail, $flags);
+    });
+    guard $db->register<fixtures::SettingRepository>();
+    guard fixtures::Carbon::register($db);
+    guard fixtures::Carbon::check($db);
+    return $db;
+}
+
+internal function sealed(carbon::Source $source) : DB
+{
+    DB $db = wired($source);
+    $db->seal();
+    return $db;
+}
+
+test a_sealed_db_serves_many_threads
+{
+    array<fake::Driver<Mysql>> $fakes = [];
+    foreach (0 .. 8 as $i) {
+        fake::Driver<Mysql> $f = fake::Driver<Mysql>();
+        foreach (0 .. 50 as $n) {
+            $f->written($insertId: ($i * 100 + $n + 1) as uint64);
+        }
+        $fakes[] = $f;
+    }
+    fake::Source<Mysql> $source = fake::Source<Mysql>($fakes);
+    DB $db = sealed($source);
+    array<thread::task<int64>> $workers = array<thread::task<int64>>();
+    foreach (0 .. 8 as $w) {
+        thread::task<int64> $t = guard thread::spawn(function() : int64 {
+            Session $s = $db->scoped();
+            int64 $sum = 0;
+            foreach (0 .. 50 as $n) {
+                // a repository built for the session each time: the registry is read by every thread
+                TagRepository $tags = guard $s->repo<TagRepository>();
+                Tag $tag = Tag($noteId: 1, $name: "t{$n}");
+                guard $tags->save($tag);
+                $sum = $sum + $tag->id;
+            }
+            return $sum;
+        }) else ($e) {
+            die($e->message());
+        }
+        $workers->push($t);
+    }
+    int64 $total = 0;
+    foreach ($workers as &$t) {
+        $total = $total + $t->wait();
+    }
+    // every insert id handed out exactly once: the sum over i < 8, n < 50 of 100i + n + 1
+    assert($total == 140000 + 10200);
+    assert($source->opened() == 8);
+    foreach ($fakes as const &$f) {
+        assert($f->count() == 50);
+    }
+}
+
+test a_sealed_db_refuses_a_registration
+{
+    DB $db = sealed(fake::Source<Mysql>([fake::Driver<Mysql>()]));
+    assert($db->sealed());
+    status<Error> $s = $db->register<NoteRepository>();
+    assert($s->failed());
+    bool $refused = match ($s->failure()) {
+        Error::sealed => true,
+        else => false,
+    };
+    assert($refused);
+    assert("{$s->failure()}" == 'the DB is sealed; register everything before seal()');
+}
+
+#[tests: expects death]
+test a_sealed_db_refuses_a_listener
+{
+    DB $db = sealed(fake::Source<Mysql>([fake::Driver<Mysql>()]));
+    $db->listen(carbon::listen::Log());
+}
+
+#[tests: expects death]
+test a_sealed_db_refuses_an_observer
+{
+    DB $db = sealed(fake::Source<Mysql>([fake::Driver<Mysql>()]));
+    $db->store<Note, int64, fixtures::NoteTable>()->observe(Witness(fixtures::Trail()));
+}
+
+test a_log_heard_by_many_threads_keeps_every_statement
+{
+    array<fake::Driver<Mysql>> $fakes = [];
+    foreach (0 .. 4 as $i) {
+        fake::Driver<Mysql> $f = fake::Driver<Mysql>();
+        foreach (0 .. 25 as $n) {
+            $f->written($insertId: 1);
+        }
+        $fakes[] = $f;
+    }
+    DB $db = wired(fake::Source<Mysql>($fakes));
+    carbon::listen::Log $log = carbon::listen::Log();
+    $db->listen($log);
+    $db->seal();
+    array<thread::handle> $workers = array<thread::handle>();
+    foreach (0 .. 4 as $w) {
+        thread::handle $h = guard thread::spawn(function() : void {
+            TagRepository $tags = guard $db->scoped()->repo<TagRepository>();
+            foreach (0 .. 25 as $n) {
+                Tag $tag = Tag($noteId: 1, $name: 'x');
+                guard $tags->save($tag);
+            }
+        }) else ($e) {
+            die($e->message());
+        }
+        $workers->push($h);
+    }
+    foreach ($workers as &$h) {
+        $h->join();
+    }
+    assert($log->count() == 100);
+}

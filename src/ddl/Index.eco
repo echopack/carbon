@@ -1,0 +1,32 @@
+namespace carbon::ddl;
+
+/**
+ * An index on one or more columns. An empty name is made from the table and the columns:
+ * `users_email_unique`, `posts_author_id_index`.
+ */
+public struct Index
+{
+    public array<string> $columns;
+    public bool $unique = false;
+    public string $name = '';
+
+    /**
+     * The index's name in table `$table`.
+     */
+    public const function named(const string& $table) : string
+    {
+        if ($this->name->size() > 0) {
+            return $this->name;
+        }
+        string $out = $table;
+        foreach ($this->columns as const &$c) {
+            $out->append("_{$c}");
+        }
+        if ($this->unique) {
+            $out->append('_unique');
+        } else {
+            $out->append('_index');
+        }
+        return $out;
+    }
+}

@@ -181,7 +181,7 @@ test emits_a_schema
     assert($out->contains("        app::Status $c3 = guard app::Status::from($b3) else \{ return .error(.column('status', .unknown)); }"));
     assert($out->contains('        array<string> $c4 = guard app::Csv()->decode($r4)'));
     assert($out->contains('        int64 $s3 = $m->status->value() as int64;'));
-    assert($out->contains('            $m->postedAt = $now;'));
+    assert($out->contains('            $m->postedAt = carbon::Temporal::stored($now);'));
     assert($out->contains('        return PostTable::$gone->isNull();'));
     assert($out->contains("    public const function keyAfter(int64 $key) : hydrahon::Term<bool>\n    \{\n        return PostTable::$id > $key;"));
     assert($out->contains("    public const function created() : hydrahon::Order?\n    \{\n        return PostTable::$postedAt->asc();"));
@@ -203,17 +203,21 @@ test emits_a_schema
     assert($out->contains("public struct UserQuery : carbon::Query<app::User, UserQuery>, UserRelations<UserQuery>\n\{\n    internal UserRows $rows;\n\n    public constructor(carbon::Session $session)"));
     // the generated repository is a struct that keeps its session; its wiring brings load()
     assert($out->contains("public struct UserRepository : carbon::Repository<app::User, app::UserQuery, int64>, UserWiring\n\{\n    public carbon::Session $session;\n}"));
-    assert($out->contains('    internal carbon::relation::Fetch<app::User, app::UserQuery, app::UserRepository> $fetch;'));
+    assert($out->contains('    internal carbon::relation::Loader<app::Post, app::User, int64, int64, app::UserQuery, app::UserRepository> $loader;'));
     assert($out->contains('    public function from(app::UserQuery $base) : PostAuthorRelation'));
     assert($out->contains('    public function with(carbon::Eager<app::User> $relation) : PostAuthorRelation'));
-    assert($out->contains("    public function constrain(function<app::UserQuery(app::UserQuery)> $constrain) : PostAuthorRelation\n    \{\n        $this->fetch->constrain($constrain);"));
-    assert($out->contains('            app::UserQuery $q = guard $this->fetch->query($session, app::UserTable::$id in $keys->list(), $seen) else ($e) { return .error($e); }'));
-    assert($out->contains("            int64 $k = $m->authorId;\n            app::User? $fresh = $by->first($k);\n            if ($fresh != null) \{\n                $m->author->set($fresh);"));
+    assert($out->contains("    public function constrain(function<app::UserQuery(app::UserQuery)> $constrain) : PostAuthorRelation\n    \{\n        $this->loader->constrain($constrain);"));
+    // the loader is told how a post and its author tie together, and does the rest
+    assert($out->contains("            belongsTo: 'app::UserRepository',\n            function(app::Post $m) : int64? \{ return $m->authorId; },\n            function(app::User $t) : int64? \{ return $t->id; },\n            function(app::User $t) : int64 \{ return $t->id; },"));
+    assert($out->contains('            function(array<int64> $keys) : hydrahon::Term<bool> { return app::UserTable::$id in mv $keys; },'));
+    assert($out->contains('            function(app::Post $m, app::User? $found) : void { $m->author->set($found); },'));
+    assert($out->contains('            function(app::Post $m, app::User $held) : void { $m->author->share($held); }'));
+    assert($out->contains("        return $this->loader->load($models, $session, $seen);"));
     assert($out->contains('public class UserPostsRelation : carbon::Eager<app::User>'));
-    assert($out->contains('            app::PostQuery $q = guard $this->fetch->query($session, app::PostTable::$authorId in $keys->list(), $seen) else ($e) { return .error($e); }'));
-    assert($out->contains('            $m->posts->set($by->all($m->id));'));
+    assert($out->contains("            hasMany: 'app::PostRepository',\n            function(app::User $m) : int64? \{ return $m->id; },\n            function(app::Post $t) : int64? \{ return $t->authorId; },"));
+    assert($out->contains('            function(app::User $m, array<app::Post> $found) : void { $m->posts->set(mv $found); }'));
     // no timestamps, no soft delete on users
-    assert($out->contains("    public const function trash(app::User& $m, hydrahon::DateTime? $at) : bool\n    \{\n        return false;"));
+    assert($out->contains("    public const function trash(app::User& $m, std::time::timestamp? $at) : bool\n    \{\n        return false;"));
     // users have no created timestamp: byKey is followed straight by keyAt, no created()
     assert($out->contains('        return UserTable::$id->asc();\n    }\n\n    public const function keyAt'));
 }
@@ -231,7 +235,7 @@ test a_declared_query_and_repository_are_used
     assert(!$out->contains('public struct PostQuery'));
     assert(!$out->contains('public type PostRepository'));
     assert($out->contains('    function withPosts(function<app::Posts(app::Posts)> $constrain) : S'));
-    assert($out->contains('    internal carbon::relation::Fetch<app::Post, app::Posts, app::PostRepository> $fetch;'));
+    assert($out->contains('    internal carbon::relation::Loader<app::User, app::Post, int64, int64, app::Posts, app::PostRepository> $loader;'));
 }
 
 test tables_and_computed_fields
@@ -319,7 +323,7 @@ test reports_model_problems
     assert($s->problems[0] == 'src/t.eco:2: app::Bad::$id: #[carbon::key] takes nothing, or assigned for a key the app sets');
     assert($s->problems[1] == 'src/t.eco:3: app::Bad::$secret: a column cannot be private, carbon reads and writes it');
     assert($s->problems[2] == "src/t.eco:4: app::Bad::$tags: no column type for array<string>; add #[carbon::codec: 'json'] (or csv, lines, a codec of your own) or mark it #[carbon::skip]");
-    assert($s->problems[3] == 'src/t.eco:5: app::Bad::$at: #[carbon::deleted] goes on a hydrahon::DateTime? field');
+    assert($s->problems[3] == 'src/t.eco:5: app::Bad::$at: #[carbon::deleted] goes on a nullable time::timestamp, calendar::DateTime or hydrahon::DateTime field');
     assert($s->problems[4] == 'src/t.eco:6: app::Bad::$x: unknown attribute #[carbon::colum]');
     assert($s->problems[5] == 'src/t.eco:1: app::Bad: a model needs a carbon::Link field: public carbon::Link $link = .detached();');
     assert($s->problems[6] == 'src/t.eco:10: app::Plain: field attributes need #[carbon::model] on the type');

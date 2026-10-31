@@ -1,0 +1,90 @@
+namespace carbon::ddl;
+
+/**
+ * One change of an `Alter`.
+ */
+public enum Change
+{
+    case add(Column $column);
+    case drop(string $column);
+    case rename(string $from, string $to);
+
+    /**
+     * Give an existing column a new definition, kept under its name.
+     */
+    case modify(Column $column);
+    case index(Index $index);
+    case dropIndex(string $name);
+    case foreign(Foreign $foreign);
+    case dropForeign(string $name);
+}
+
+/**
+ * Changes to an existing table, run in the order they were added. The column helpers of
+ * `Columns` add columns.
+ *
+ * ```echo
+ * carbon::ddl::Alter('users')
+ *     ->string('nickname', 64, $nullable: true)
+ *     ->rename('name', 'full_name')
+ *     ->unique(['nickname']);
+ * ```
+ */
+public struct Alter : Columns<Alter>
+{
+    public string $table;
+    public array<Change> $changes = [];
+
+    public function add(Column $column) : Alter
+    {
+        return $this->change(.add($column));
+    }
+
+    public const function drop(string $column) : Alter
+    {
+        return $this->change(.drop($column));
+    }
+
+    public const function rename(string $from, string $to) : Alter
+    {
+        return $this->change(.rename($from, $to));
+    }
+
+    public const function modify(Column $column) : Alter
+    {
+        return $this->change(.modify($column));
+    }
+
+    public function add(Index $index) : Alter
+    {
+        return $this->change(.index($index));
+    }
+
+    /**
+     * Drop the index named `$name`, the name `Index::named` made when none was given.
+     */
+    public const function dropIndex(string $name) : Alter
+    {
+        return $this->change(.dropIndex($name));
+    }
+
+    public function add(Foreign $foreign) : Alter
+    {
+        return $this->change(.foreign($foreign));
+    }
+
+    /**
+     * Drop the foreign key named `$name`, the name `Foreign::named` made when none was given.
+     */
+    public const function dropForeign(string $name) : Alter
+    {
+        return $this->change(.dropForeign($name));
+    }
+
+    private const function change(Change $c) : Alter
+    {
+        Alter $copy = $this;
+        $copy->changes[] = mv $c;
+        return $copy;
+    }
+}

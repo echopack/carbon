@@ -1,0 +1,171 @@
+use std::time;
+use carbon::{Temporal, Problem};
+use hydrahon::{Value, DateTime, Date};
+use fixtures::{World, Shift, ShiftTable};
+
+/**
+ * A stored shift on 2026-10-31, as the fake hands its row back.
+ */
+function shiftRow(int64 $id) : array<Value>
+{
+    return ShiftTable()->row(Shift($id: $id, $day: calendar::Date(2026, .october, 31)));
+}
+
+test an_instant_is_stored_as_utc_to_the_microsecond
+{
+    time::timestamp $t = time::timestamp::from_unix_secs(951782399) + time::duration::micros(5) + time::duration::nanos(999);
+    DateTime $at = Temporal::stored($t);
+    assert($at->year == 2000 && $at->month == 2 && $at->day == 28);
+    assert($at->hour == 23 && $at->minute == 59 && $at->second == 59 && $at->micro == 5);
+    time::timestamp $back = guard Temporal::instant($at);
+    assert($back == time::timestamp::from_unix_secs(951782399) + time::duration::micros(5));
+    // before 1970 the fraction still counts forward from the second
+    DateTime $early = Temporal::stored(time::timestamp::from_unix_millis(-1500));
+    assert($early->year == 1969 && $early->hour == 23 && $early->minute == 59 && $early->second == 58 && $early->micro == 500000);
+    assert(Temporal::second(time::timestamp::from_unix_millis(-1500)) == time::timestamp::from_unix_secs(-2));
+}
+
+test calendar_values_are_stored_as_written
+{
+    Date $leap = Temporal::stored(calendar::Date(2000, .february, 29));
+    assert($leap->year == 2000 && $leap->month == 2 && $leap->day == 29);
+    calendar::Date $day = guard Temporal::day($leap);
+    assert($day == calendar::Date(2000, .february, 29));
+    calendar::DateTime $wall = calendar::DateTime(2026, .march, 29, 2, 30, 0, 123456789);
+    DateTime $stored = Temporal::stored($wall);
+    assert($stored->hour == 2 && $stored->minute == 30 && $stored->micro == 123456);
+    calendar::DateTime $read = guard Temporal::wall($stored);
+    assert($read == calendar::DateTime(2026, .march, 29, 2, 30, 0, 123456000));
+    assert(Temporal::wall(time::timestamp::from_unix_secs(-1)) == calendar::DateTime(1969, .december, 31, 23, 59, 59));
+    assert(Temporal::instant(calendar::DateTime(1970, .january, 2)) == time::timestamp::from_unix_secs(86400));
+}
+
+test values_calendar_cannot_hold_do_not_read
+{
+    // MySQL's zero date, and a day no month has
+    result<time::timestamp, Problem> $zero = Temporal::instant(DateTime());
+    assert($zero->failed());
+    result<calendar::Date, Problem> $none = Temporal::day(Date($year: 2026, $month: 2, $day: 31));
+    assert($none->failed());
+    result<calendar::DateTime, Problem> $hour = Temporal::wall(DateTime(2026, 1, 1, 24));
+    assert($hour->failed());
+}
+
+test time_fields_round_trip_through_their_codecs
+{
+    $w = World();
+    $w->fake->written($insertId: 3);
+    Shift $s = guard $w->shifts->create(Shift($day: calendar::Date(2026, .october, 31), $starts: calendar::DateTime(2026, .october, 31, 8, 30)));
+    assert($s->id == 3);
+    // the clock stands at 2023-11-14T22:13:20Z
+    time::timestamp $created = guard $s->createdAt;
+    assert($created == time::timestamp::from_unix_secs(1700000000));
+    calendar::DateTime $updated = guard $s->updatedAt;
+    assert($updated == calendar::DateTime(2023, .november, 14, 22, 13, 20));
+    assert($w->fake->last() == 'INSERT INTO `shifts` (`day`, `until`, `starts`, `created_at`, `updated_at`, `deleted_at`) VALUES (?, ?, ?, ?, ?, ?)');
+    DateTime $stamp = DateTime(2023, 11, 14, 22, 13, 20);
+    assert($w->fake->sent(0, [
+        Value::from(Date($year: 2026, $month: 10, $day: 31)), Value::none, Value::from(DateTime(2026, 10, 31, 8, 30)),
+        Value::from($stamp), Value::from($stamp), Value::none,
+    ]));
+
+    $w->fake->rows([shiftRow(3)]);
+    Shift $read = guard $w->shifts->find()->one(3);
+    assert($read->day == calendar::Date(2026, .october, 31));
+    assert($read->until == null && $read->starts == null && $read->createdAt == null);
+}
+
+test a_zero_date_in_the_row_is_a_column_error
+{
+    $w = World();
+    array<Value> $row = shiftRow(1);
+    $row[1] = Value::from(Date());
+    $w->fake->rows([$row]);
+    result<Shift, carbon::Error> $r = $w->shifts->find()->one(1);
+    assert($r->failed());
+}
+
+test stamps_and_soft_delete_follow_the_clock
+{
+    $w = World();
+    $w->fake->rows([shiftRow(5)])->written(1)->written(1)->written(1);
+    Shift $s = guard $w->shifts->find()->one(5);
+    $w->clock->advance(time::duration::secs(90) + time::duration::millis(400));
+    $s->until = calendar::Date(2026, .november, 1);
+    guard $s->save();
+    // stamps drop the fraction: a DATETIME keeps whole seconds
+    calendar::DateTime $updated = guard $s->updatedAt;
+    assert($updated == calendar::DateTime(2023, .november, 14, 22, 14, 50));
+    assert($w->fake->last() == 'UPDATE `shifts` SET `until` = ?, `updated_at` = ? WHERE `shifts`.`id` = ?');
+    guard $s->delete();
+    time::timestamp $deleted = guard $s->deletedAt;
+    assert($deleted == time::timestamp::from_unix_secs(1700000090));
+    // the save already stamped this second, so only the soft delete column changed
+    assert($w->fake->last() == 'UPDATE `shifts` SET `deleted_at` = ? WHERE `shifts`.`id` = ?');
+    assert($w->fake->sent(2, [Value::from(DateTime(2023, 11, 14, 22, 14, 50)), Value::from(5)]));
+    guard $s->restore();
+    assert($s->deletedAt == null);
+}
+
+test a_failed_soft_delete_puts_the_instant_back
+{
+    $w = World();
+    $w->fake->rows([shiftRow(6)])->fails(fixtures::failure(.other));
+    Shift $s = guard $w->shifts->find()->one(6);
+    status<carbon::Error> $gone = $s->delete();
+    assert($gone->failed());
+    assert($s->deletedAt == null);
+}
+
+test time_values_meet_date_columns_in_conditions
+{
+    $w = World();
+    time::timestamp $cut = time::timestamp::from_unix_secs(1700000000);
+    $w->fake->rows([])->rows([]);
+    guard $w->shifts->find()
+        ->where(ShiftTable::$createdAt < $cut && ShiftTable::$day >= calendar::Date(2026, .january, 1))
+        ->where(ShiftTable::$updatedAt == calendar::DateTime(2023, .november, 14, 22, 13, 20) || ShiftTable::$until != calendar::Date(2026, .march, 1))
+        ->get();
+    string $text = $w->fake->last();
+    assert($text->contains(' WHERE `shifts`.`created_at` < ? AND `shifts`.`day` >= ? AND (`shifts`.`updated_at` = ? OR `shifts`.`until` <> ?) AND `shifts`.`deleted_at` IS NULL'));
+    assert($w->fake->sent(0, [
+        Value::from(DateTime(2023, 11, 14, 22, 13, 20)), Value::from(Date($year: 2026, $month: 1, $day: 1)),
+        Value::from(DateTime(2023, 11, 14, 22, 13, 20)), Value::from(Date($year: 2026, $month: 3, $day: 1)),
+    ]));
+    // the same condition through hydrahon's own values
+    guard $w->shifts->find()
+        ->where(ShiftTable::$createdAt < Temporal::stored($cut) && ShiftTable::$day >= Temporal::stored(calendar::Date(2026, .january, 1)))
+        ->where(ShiftTable::$updatedAt == Temporal::stored(calendar::DateTime(2023, .november, 14, 22, 13, 20)) || ShiftTable::$until != Temporal::stored(calendar::Date(2026, .march, 1)))
+        ->get();
+    assert($w->fake->last() == $text);
+}
+
+test time_values_assign_date_columns
+{
+    hydrahon::Values $set = hydrahon::Values();
+    $set[ShiftTable::$createdAt] = time::timestamp::from_unix_secs(0);
+    $set[ShiftTable::$deletedAt] = time::timestamp::from_unix_secs(60);
+    $set[ShiftTable::$updatedAt] = calendar::DateTime(2026, .october, 31, 12);
+    $set[ShiftTable::$until] = calendar::Date(2026, .october, 31);
+    $w = World();
+    $w->fake->written(2);
+    guard $w->shifts->find()->where(ShiftTable::$id == 1)->update($set);
+    assert($w->fake->last()->starts('UPDATE `shifts` SET `created_at` = ?, `deleted_at` = ?, `updated_at` = ?, `until` = ?'));
+    assert($w->fake->sent(0, [
+        Value::from(DateTime(1970, 1, 1)), Value::from(DateTime(1970, 1, 1, 0, 1)), Value::from(DateTime(2026, 10, 31, 12)), Value::from(Date($year: 2026, $month: 10, $day: 31)), Value::from(1),
+    ]));
+}
+
+test null_keeps_hydrahons_own_forms
+{
+    // the time operators take no nullable value, so NULL still means hydrahon's
+    hydrahon::Values $set = hydrahon::Values();
+    DateTime? $none = null;
+    $set[ShiftTable::$deletedAt] = $none;
+    hydrahon::Values $other = hydrahon::Values();
+    $other[ShiftTable::$deletedAt] = null;
+    $w = World();
+    $w->fake->rows([]);
+    guard $w->shifts->find()->scope(.all)->where(ShiftTable::$deletedAt == $none)->get();
+    assert($w->fake->last()->ends(' WHERE `shifts`.`deleted_at` IS NULL'));
+}

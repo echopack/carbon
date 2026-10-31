@@ -67,6 +67,17 @@ public struct Names
     }
 
     /**
+     * `$name` in namespace `$space`, as it is named from outside it.
+     */
+    public static function qualify(const string& $space, const string& $name) : string
+    {
+        if ($space->size() == 0) {
+            return $name;
+        }
+        return "{$space}::{$name}";
+    }
+
+    /**
      * Whether a name can go into the generated source as a single quoted
      * literal: no quote, no backslash, no control bytes, not empty.
      */
@@ -114,12 +125,12 @@ public struct Names
         return $b >= 65 && $b <= 90;
     }
 
-    private static function lower(uint8 $b) : bool
+    internal static function lower(uint8 $b) : bool
     {
         return $b >= 97 && $b <= 122;
     }
 
-    private static function digit(uint8 $b) : bool
+    internal static function digit(uint8 $b) : bool
     {
         return $b >= 48 && $b <= 57;
     }

@@ -29,7 +29,7 @@ namespace carbon;
  * }
  * ```
  *
- * It is registered on a `Db` by type, with what builds it:
+ * It is registered on a `DB` by type, with what builds it:
  * `$db->register<PostRepository>(function[$mailer](carbon::Session $s) : PostRepository { ... })`,
  * and every session builds its own, `$session->repo<PostRepository>()`. `$posts->find()` starts a
  * query, `$posts->get(42)` reads one model and `$posts->load()` fills the relations of models
@@ -160,16 +160,6 @@ public interface Repository<M, Q, K>
     {
         $st = $this->store();
         return $st->dirty($model);
-    }
-
-    /**
-     * Run `$observer` around every write of the model from now on, in every session, inside the
-     * repository's own hooks.
-     */
-    function observe(Observer<M> $observer) : void
-    {
-        $st = $this->store();
-        $st->observe(mv $observer);
     }
 
     function all() : result<array<M>, Error>

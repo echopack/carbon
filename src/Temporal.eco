@@ -1,0 +1,139 @@
+namespace carbon;
+
+use std::time;
+
+/**
+ * Moves times between the app's types and the column values hydrahon binds. A
+ * `time::timestamp` is an instant, so carbon stores it in a DATETIME as UTC and reads it back
+ * the same way; a `calendar::DateTime` and a `calendar::Date` are wall clock values and go
+ * in as written. carbongen calls these for fields of those types, and app code calls them
+ * where it hands hydrahon a value itself:
+ *
+ * ```echo
+ * $set[PostTable::$publishedAt] = carbon::Temporal::stored($at);
+ * ```
+ *
+ * Reading is checked: a stored value calendar cannot hold, such as MySQL's zero date
+ * `0000-00-00`, comes back as `Problem::range`.
+ */
+public struct Temporal
+{
+    /**
+     * The UTC date and time of `$t`, to the microsecond, as a DATETIME column takes it.
+     */
+    public static function stored(time::timestamp $t) : hydrahon::DateTime
+    {
+        int64 $secs = $t->unix_secs();
+        Temporal::check($secs, 'a time::timestamp');
+        time::duration $rest = $t - time::timestamp::from_unix_secs($secs);
+        hydrahon::DateTime $at = hydrahon::DateTime(unix: $secs);
+        $at->micro = ($rest->as_nanos() / 1000) as uint32;
+        return $at;
+    }
+
+    /**
+     * `$t` as a DATETIME column takes it, to the microsecond.
+     */
+    public static function stored(const calendar::DateTime& $t) : hydrahon::DateTime
+    {
+        hydrahon::Date $day = Temporal::stored($t->date);
+        return hydrahon::DateTime(
+            $day->year, $day->month, $day->day,
+            $t->time->hour as uint8, $t->time->minute as uint8, $t->time->second as uint8,
+            ($t->time->nanosecond / 1000) as uint32
+        );
+    }
+
+    /**
+     * `$d` as a DATE column takes it.
+     */
+    public static function stored(const calendar::Date& $d) : hydrahon::Date
+    {
+        Temporal::check($d->epochDay() * 86400, 'a calendar date');
+        return hydrahon::Date($d->year as uint16, $d->month->number() as uint8, $d->day as uint8);
+    }
+
+    /**
+     * The instant a DATETIME column holds, read as UTC.
+     */
+    public static function instant(const hydrahon::DateTime& $at) : result<time::timestamp, Problem>
+    {
+        calendar::DateTime $wall = guard Temporal::wall($at) else ($e) {
+            return .error($e);
+        };
+        return .ok(Temporal::instant($wall));
+    }
+
+    /**
+     * The instant `$wall` names when read as UTC.
+     */
+    public static function instant(const calendar::DateTime& $wall) : time::timestamp
+    {
+        int64 $secs = $wall->date->epochDay() * 86400 + ($wall->time->hour as int64) * 3600
+            + ($wall->time->minute as int64) * 60 + ($wall->time->second as int64);
+        return time::timestamp::from_unix_secs($secs) + time::duration::nanos($wall->time->nanosecond as int64);
+    }
+
+    /**
+     * The date and time a DATETIME column holds, as written.
+     */
+    public static function wall(const hydrahon::DateTime& $at) : result<calendar::DateTime, Problem>
+    {
+        calendar::DateTime $wall = guard calendar::DateTime::of(
+            $at->year as int64, $at->month as int64, $at->day as int64,
+            $at->hour as int64, $at->minute as int64, $at->second as int64,
+            ($at->micro as int64) * 1000
+        ) else {
+            return .error(.range);
+        };
+        return .ok($wall);
+    }
+
+    /**
+     * The date a DATE column holds.
+     */
+    public static function day(const hydrahon::Date& $d) : result<calendar::Date, Problem>
+    {
+        calendar::Date $day = guard calendar::Date::of($d->year as int64, $d->month as int64, $d->day as int64) else {
+            return .error(.range);
+        };
+        return .ok($day);
+    }
+
+    /**
+     * The UTC date and time of `$t`: what a `calendar::DateTime` field is stamped with.
+     */
+    public static function wall(time::timestamp $t) : calendar::DateTime
+    {
+        int64 $secs = $t->unix_secs();
+        int64 $days = $secs / 86400;
+        int64 $rest = $secs % 86400;
+        if ($rest < 0) {
+            $rest = $rest + 86400;
+            $days = $days - 1;
+        }
+        time::duration $fraction = $t - time::timestamp::from_unix_secs($secs);
+        return calendar::DateTime(calendar::Date(epochDay: $days), calendar::Time(nanos: $rest * 1000000000 + $fraction->as_nanos()));
+    }
+
+    /**
+     * `$t` without its fraction: the instant a DATETIME column without fractional seconds
+     * gives back.
+     */
+    public static function second(time::timestamp $t) : time::timestamp
+    {
+        return time::timestamp::from_unix_secs($t->unix_secs());
+    }
+
+    /**
+     * A DATE or DATETIME column holds years 0 to 9999; anything else has no column form, so
+     * storing it stops the program.
+     */
+    internal static function check(int64 $secs, const string& $what) : void
+    {
+        // 0000-01-01T00:00:00Z and 10000-01-01T00:00:00Z
+        if ($secs < -62167219200 || $secs >= 253402300800) {
+            die("carbon::Temporal: {$what} before the year 0 or after 9999 has no column form");
+        }
+    }
+}

@@ -1,9 +1,0 @@
-namespace carbon;
-
-/**
- * Where timestamps come from. Tests pass a `carbon::clock::Fixed` so created and updated times are known.
- */
-public interface Clock
-{
-    function now() : hydrahon::DateTime;
-}

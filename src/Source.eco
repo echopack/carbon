@@ -1,0 +1,20 @@
+namespace carbon;
+
+/**
+ * Where a `DB` gets its connections: each session opens one the first time it runs a statement
+ * and keeps it until the session is gone, so a session's transaction is its own. A pool is a
+ * source whose connections go back to it when they are dropped; `carbon::mysql::Source` is one.
+ * `DB($driver)` wraps its one driver in a `Single`.
+ */
+public interface Source
+{
+    /**
+     * A connection for one session. It is the session's alone until the session lets go of it.
+     */
+    function open() : result<Driver, Error>;
+
+    /**
+     * What the connections of this source can do.
+     */
+    const function traits() : Traits;
+}

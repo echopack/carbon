@@ -1,29 +1,49 @@
 namespace carbon::listen;
 
+use std::thread;
+
 /**
  * A listener that keeps every statement. `count()` is how a test says "this costs two queries".
+ * The sessions of many threads may tell it at once.
  */
+#[atomic]
 public class Log : Listener
 {
-    public array<Ran> $entries = [];
+    private thread::mutex<array<Ran>> $kept;
+
+    public constructor()
+    {
+        $this->kept = thread::mutex<array<Ran>>(array<Ran>());
+    }
 
     public function ran(const Ran& $event) : void
     {
-        $this->entries[] = $event;
+        thread::locked<array<Ran>> $held = $this->kept->lock();
+        $held->value[] = $event;
     }
 
-    public const function count() : usize
+    /**
+     * Every statement so far, in order.
+     */
+    public function entries() : array<Ran>
     {
-        return $this->entries->count();
+        thread::locked<array<Ran>> $held = $this->kept->lock();
+        return $held->value;
+    }
+
+    public function count() : usize
+    {
+        thread::locked<array<Ran>> $held = $this->kept->lock();
+        return $held->value->count();
     }
 
     /**
      * The SQL text of every statement, in order.
      */
-    public const function texts() : array<string>
+    public function texts() : array<string>
     {
         array<string> $out = [];
-        foreach ($this->entries as const &$e) {
+        foreach ($this->entries() as const &$e) {
             $out[] = $e->statement->text;
         }
         return $out;
@@ -31,6 +51,7 @@ public class Log : Listener
 
     public function clear() : void
     {
-        $this->entries = [];
+        thread::locked<array<Ran>> $held = $this->kept->lock();
+        $held->value = [];
     }
 }

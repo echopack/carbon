@@ -1,0 +1,51 @@
+namespace carbon::migrate;
+
+/**
+ * A migration the database has run: one row of the ledger.
+ */
+public struct Applied
+{
+    public string $id;
+
+    /**
+     * The run it came with. `Migrator::down` undoes the last batch as a whole.
+     */
+    public int64 $batch;
+    public hydrahon::DateTime $at;
+}
+
+/**
+ * Where the database stands against the migrations the app knows.
+ */
+public struct Report
+{
+    /**
+     * What ran, in id order.
+     */
+    public array<Applied> $applied = [];
+
+    /**
+     * The ids of what has not run yet, in the order `up` runs them.
+     */
+    public array<string> $pending = [];
+
+    /**
+     * Ids the ledger holds but the app has no migration for: written by another version of
+     * the app, or a migration since removed.
+     */
+    public array<string> $unknown = [];
+
+    /**
+     * The batch the last run recorded, 0 when nothing ran.
+     */
+    public const function last() : int64
+    {
+        int64 $last = 0;
+        foreach ($this->applied as const &$a) {
+            if ($a->batch > $last) {
+                $last = $a->batch;
+            }
+        }
+        return $last;
+    }
+}

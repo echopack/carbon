@@ -4,13 +4,14 @@
  *   blog --url mysql://app:secret@127.0.0.1:3306/blog
  *   CARBON_MYSQL_URL=mysql://... blog
  *
- * Drops and recreates the users, posts and comments tables, then walks
- * through carbon: creating, publishing, the repositories' finders, eager
- * loading, a bulk update and a transaction that rolls back.
+ * Rolls the blog's migrations back and runs them again for fresh users,
+ * posts and comments tables, then walks through carbon: creating,
+ * publishing, the repositories' finders, eager loading, a bulk update and a
+ * transaction that rolls back.
  */
 
-use blog::{Tables, User, Post, CommentQuery, UserRepository, PostRepository, CommentRepository};
-use carbon::{Db, Session, Error};
+use blog::{User, Post, CommentQuery, UserRepository, PostRepository, CommentRepository};
+use carbon::{DB, Session, Error, Migrator};
 use carbon::mysql::Driver;
 use carbon::listen::Log;
 use std::env;
@@ -27,13 +28,13 @@ if ($url->empty()) {
     env::exit(1);
 }
 
-// connect and lay down the tables
+// connect, undo what the last run migrated and migrate again: fresh tables every run
 Driver $driver = guard Driver::open($url) else ($e) { die("connect: {$e}"); }
-Db $db = Db($driver);
-foreach (Tables::recreate() as const &$sql) {
-    guard $db->run($sql) else ($e) { die("{$sql}: {$e}"); }
-}
-io::println('tables created');
+DB $db = DB($driver);
+Migrator $migrator = Migrator($db, blog::Carbon::migrations(), carbon::ddl::Mysql());
+array<string> $undone = guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+array<string> $ran = guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+io::println("migrations {$undone->count()} rolled back, {$ran->count()} run");
 
 // every statement carbon runs from here on lands in the log
 Log $log = Log();
@@ -45,7 +46,7 @@ guard $db->register<PostRepository>();
 guard $db->register<CommentRepository>();
 // every repository the models need is there, or the app stops here and names the missing one
 guard blog::Carbon::check($db) else ($e) { die("wiring: {$e}"); }
-// a script has one session: the Db's own
+// a script has one session: the DB's own
 Session $session = $db->session();
 UserRepository $users = guard $session->repo<UserRepository>();
 PostRepository $posts = guard $session->repo<PostRepository>();

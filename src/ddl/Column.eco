@@ -1,0 +1,29 @@
+namespace carbon::ddl;
+
+/**
+ * One column of a table, as a migration creates or changes it.
+ */
+public struct Column
+{
+    public string $name;
+    public Kind $kind;
+    public bool $nullable = false;
+
+    /**
+     * The value the column takes when an insert leaves it out, null for none.
+     * `hydrahon::Value::none` is a default of NULL.
+     */
+    public hydrahon::Value? $default = null;
+    public bool $unsigned = false;
+
+    /**
+     * The database numbers new rows: `AUTO_INCREMENT` on MySQL.
+     */
+    public bool $increments = false;
+
+    /**
+     * The column is the table's key on its own. A key of several columns is `Table::primary`.
+     */
+    public bool $primary = false;
+    public bool $unique = false;
+}

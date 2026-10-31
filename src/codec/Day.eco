@@ -1,0 +1,18 @@
+namespace carbon::codec;
+
+/**
+ * `calendar::Date` as a DATE. carbongen picks it for every field of that type; no
+ * `#[carbon::codec]` needed.
+ */
+public struct Day : carbon::Codec<calendar::Date, hydrahon::Date>
+{
+    public const function decode(hydrahon::Date $raw) : result<calendar::Date, carbon::Problem>
+    {
+        return carbon::Temporal::day($raw);
+    }
+
+    public const function encode(const calendar::Date& $value) : hydrahon::Date
+    {
+        return carbon::Temporal::stored($value);
+    }
+}

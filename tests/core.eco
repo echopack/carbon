@@ -1,4 +1,5 @@
-use carbon::{Db, Error, Failure};
+use carbon::{DB, Error, Failure};
+use std::time;
 use carbon::change::{Changes, Snapshot};
 use carbon::listen::Log;
 use carbon::fake;
@@ -66,7 +67,7 @@ test fake_records_and_answers_in_order
 {
     $fake = fake::Driver<Mysql>();
     $fake->written(2)->fails(.missing);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     hydrahon::Table $t = hydrahon::Table(name: 'things');
     hydrahon::Term<int64> $id = $t->column<int64>('id');
     hydrahon::Delete $q = hydrahon::Delete(from: $t);
@@ -86,7 +87,7 @@ test fake_reads_like_a_driver
 {
     $fake = fake::Driver<Mysql>();
     $fake->rows([[Value::from(1), Value::from(true), Value::none], [Value::from(0), Value::from('x'), Value::from(2.5)]]);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     hydrahon::Table $t = hydrahon::Table(name: 'things');
     carbon::Cursor $c = guard $db->connection()->query(hydrahon::Select(from: $t));
     bool $first = guard $c->step();
@@ -108,7 +109,7 @@ test fake_reads_like_a_driver
 test transaction_commits
 {
     $fake = fake::Driver<Mysql>();
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     guard $db->session()->transaction(function[$db]() : status<Error> {
         assert($db->inTransaction());
         return .ok();
@@ -120,7 +121,7 @@ test transaction_commits
 test transaction_rolls_back_and_keeps_the_error
 {
     $fake = fake::Driver<Mysql>();
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     status<Error> $s = $db->session()->transaction(function() : status<Error> {
         return .error(.refused(carbon::Refusal('no')));
     });
@@ -133,7 +134,7 @@ test transaction_rolls_back_and_keeps_the_error
 test transaction_does_not_nest
 {
     $fake = fake::Driver<Mysql>();
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     status<Error> $s = $db->session()->transaction(function[$db]() : status<Error> {
         return $db->session()->transaction(function() : status<Error> { return .ok(); });
     });
@@ -146,7 +147,7 @@ test log_hears_every_statement
 {
     $fake = fake::Driver<Mysql>();
     $fake->written(1)->written(0);
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     Log $log = Log();
     $db->listen($log);
     hydrahon::Table $t = hydrahon::Table(name: 'things');
@@ -155,13 +156,13 @@ test log_hears_every_statement
     guard $db->run('TRUNCATE things');
     assert($log->count() == 4);
     assert(str::join($log->texts(), ' | ') == 'DELETE FROM `things` | BEGIN | COMMIT | TRUNCATE things');
-    assert(!$log->entries[0]->failed);
+    assert(!$log->entries()[0]->failed);
 }
 
 test a_transaction_hands_back_what_it_made
 {
     $fake = fake::Driver<Mysql>();
-    Db $db = Db($fake);
+    DB $db = DB($fake);
     result<int64, Error> $made = $db->session()->transaction(function() : result<int64, Error> {
         return .ok(42);
     });
@@ -176,12 +177,13 @@ test a_transaction_hands_back_what_it_made
     assert(!$db->inTransaction());
 }
 
-test fixed_clock_moves_when_told
+test now_drops_the_fraction_of_the_clock
 {
-    carbon::clock::Fixed $clock = carbon::clock::Fixed(unix: 0);
-    DateTime $a = $clock->now();
-    assert($a->year == 1970 && $a->month == 1 && $a->day == 1);
-    $clock->advance(86400 + 3661);
-    DateTime $b = $clock->now();
-    assert($b->day == 2 && $b->hour == 1 && $b->minute == 1 && $b->second == 1);
+    calendar::ManualClock $clock = calendar::ManualClock(time::timestamp::from_unix_secs(5) + time::duration::millis(700));
+    DB $db = DB(fake::Driver<Mysql>(), clock: $clock);
+    assert($db->now() == time::timestamp::from_unix_secs(5));
+    assert($db->session()->now() == time::timestamp::from_unix_secs(5));
+    assert($db->clock()->now() == time::timestamp::from_unix_secs(5) + time::duration::millis(700));
+    $clock->advance(time::duration::secs(86400 + 3661));
+    assert($db->session()->connection()->now()->unix_secs() == 86400 + 3666);
 }

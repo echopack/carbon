@@ -1,0 +1,26 @@
+namespace blog;
+
+#[carbon::migration: '20261029120100_create_posts']
+public class CreatePosts : carbon::Migration
+{
+    public function up(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->create(carbon::ddl::Table('posts')
+            ->id()
+            ->bigint('author_id')
+            ->string('title')
+            ->text('body', $nullable: true)
+            ->tinyint('status', $default: 0, $unsigned: true)
+            ->int('views', $default: 0)
+            ->string('tags', $default: '')
+            ->json('meta')
+            ->timestamps()
+            ->softDeletes()
+            ->foreign('author_id', 'users'));
+    }
+
+    public function down(carbon::Migrating $m) : status<carbon::Error>
+    {
+        return $m->drop('posts');
+    }
+}

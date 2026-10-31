@@ -1,0 +1,148 @@
+use carbon::ddl::{Table, Alter, Column, Mysql};
+use hydrahon::{Value, Date, DateTime, Time, Bytes, Decimal};
+
+/**
+ * The one statement `$g` writes for `$t`, or the error's message.
+ */
+function created(const Mysql& $g, const Table& $t) : string
+{
+    array<string> $out = guard $g->create($t) else ($e) {
+        return str::from($e);
+    }
+    assert($out->count() == 1);
+    return $out[0];
+}
+
+function altered(const Mysql& $g, const Alter& $a) : string
+{
+    array<string> $out = guard $g->alter($a) else ($e) {
+        return str::from($e);
+    }
+    assert($out->count() == 1);
+    return $out[0];
+}
+
+test a_table_is_created_with_its_columns_in_order
+{
+    Mysql $g = Mysql();
+    Table $users = Table('users')
+        ->id()
+        ->string('email', 190, $unique: true)
+        ->string('name', 190)
+        ->bool('admin', $default: false)
+        ->timestamps();
+    assert(created($g, $users) == 'CREATE TABLE `users` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `email` VARCHAR(190) NOT NULL UNIQUE, `name` VARCHAR(190) NOT NULL, `admin` TINYINT(1) NOT NULL DEFAULT 0, `created_at` DATETIME NULL, `updated_at` DATETIME NULL)');
+}
+
+test indexes_and_foreign_keys_follow_the_columns
+{
+    Mysql $g = Mysql();
+    Table $posts = Table('posts')
+        ->id()
+        ->bigint('author_id')
+        ->tinyint('status', $default: 0, $unsigned: true)
+        ->json('meta')
+        ->softDeletes()
+        ->index(['author_id', 'status'])
+        ->unique(['author_id', 'meta'], $name: 'one_meta')
+        ->foreign('author_id', 'users', $onDelete: .cascade);
+    assert(created($g, $posts) == 'CREATE TABLE `posts` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `author_id` BIGINT NOT NULL, `status` TINYINT UNSIGNED NOT NULL DEFAULT 0, `meta` JSON NOT NULL, `deleted_at` DATETIME NULL, INDEX `posts_author_id_status_index` (`author_id`, `status`), UNIQUE INDEX `one_meta` (`author_id`, `meta`), CONSTRAINT `posts_author_id_foreign` FOREIGN KEY (`author_id`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT)');
+}
+
+test a_key_of_several_columns_and_a_table_made_only_when_missing
+{
+    Mysql $g = Mysql();
+    Table $pivot = Table('movie_genres')
+        ->bigint('movie_id')
+        ->string('genre', 32)
+        ->primary(['movie_id', 'genre'])
+        ->ifMissing();
+    assert(created($g, $pivot) == 'CREATE TABLE IF NOT EXISTS `movie_genres` (`movie_id` BIGINT NOT NULL, `genre` VARCHAR(32) NOT NULL, PRIMARY KEY (`movie_id`, `genre`))');
+}
+
+test every_kind_has_a_type
+{
+    Mysql $g = Mysql();
+    Table $all = Table('kinds')
+        ->int('a', $nullable: true)
+        ->smallint('b')
+        ->text('c')
+        ->decimal('d', 8, 3)
+        ->float('e')
+        ->double('f')
+        ->date('g')
+        ->datetime('h')
+        ->time('i')
+        ->bytes('j');
+    assert(created($g, $all) == 'CREATE TABLE `kinds` (`a` INT NULL, `b` SMALLINT NOT NULL, `c` TEXT NOT NULL, `d` DECIMAL(8,3) NOT NULL, `e` FLOAT NOT NULL, `f` DOUBLE NOT NULL, `g` DATE NOT NULL, `h` DATETIME NOT NULL, `i` TIME NOT NULL, `j` BLOB NOT NULL)');
+}
+
+test defaults_are_written_as_literals
+{
+    assert(Mysql::value(Value::none) == 'NULL');
+    assert(Mysql::value(Value::from(true)) == '1');
+    assert(Mysql::value(Value::from(-7 as int64)) == '-7');
+    assert(Mysql::value(Value::from(Decimal('12.50'))) == '12.50');
+    assert(Mysql::value(Value::from("it's a \\ path")) == "'it''s a \\\\ path'");
+    assert(Mysql::value(Value::from(Bytes("\x01\x7F"))) == "X'017F'");
+    assert(Mysql::value(Value::from(Date(2026, 1, 9))) == "'2026-01-09'");
+    assert(Mysql::value(Value::from(DateTime(2026, 10, 29, 8, 5, 3))) == "'2026-10-29 08:05:03'");
+    assert(Mysql::value(Value::from(DateTime(2026, 10, 29, 8, 5, 3, 120))) == "'2026-10-29 08:05:03.000120'");
+    Time $t = Time();
+    $t->negative = true;
+    $t->hours = 100;
+    $t->minute = 2;
+    assert(Mysql::value(Value::from($t)) == "'-100:02:00'");
+
+    Mysql $g = Mysql();
+    Table $d = Table('d')->string('mood', 16, $default: 'calm')->int('n', $nullable: true, $default: 3);
+    assert(created($g, $d) == "CREATE TABLE `d` (`mood` VARCHAR(16) NOT NULL DEFAULT 'calm', `n` INT NULL DEFAULT 3)");
+    // a column built by hand can default to NULL
+    Table $n = Table('n')->add(Column('note', .string(10), true, Value::none));
+    assert(created($g, $n) == 'CREATE TABLE `n` (`note` VARCHAR(10) NULL DEFAULT NULL)');
+}
+
+test what_mysql_cannot_express_is_refused
+{
+    Mysql $g = Mysql();
+    assert(created($g, Table('empty')) == 'invalid: table empty has no columns');
+    assert(created($g, Table('t')->string('s', 0)) == 'invalid: column s: a string holds 1 to 16383 characters, not 0');
+    assert(created($g, Table('t')->decimal('d', 4, 6)) == 'invalid: column d: DECIMAL(4,6) needs 1 to 65 digits and a scale of at most 30, no more than the digits');
+    Column $text = Column('body', .text, false, Value::from('x'));
+    assert(created($g, Table('t')->add($text)) == 'invalid: column body: MySQL takes no default on a TEXT, JSON or BLOB column');
+    Column $neg = Column('f', .float, false, null, true);
+    assert(created($g, Table('t')->add($neg)) == 'invalid: column f: only a whole number can be unsigned');
+    Column $count = Column('s', .string(8));
+    $count->increments = true;
+    assert(created($g, Table('t')->add($count)) == 'invalid: column s: only a whole number can count up');
+    assert(altered($g, Alter('t')) == 'invalid: altering t changes nothing');
+}
+
+test an_alter_runs_its_changes_in_order
+{
+    Mysql $g = Mysql();
+    Alter $a = Alter('users')
+        ->string('nickname', 64, $nullable: true)
+        ->drop('legacy')
+        ->rename('name', 'full_name')
+        ->modify(Column('email', .string(255)))
+        ->unique(['nickname'])
+        ->index(['full_name'], $name: 'by_name')
+        ->dropIndex('users_old_index')
+        ->foreign('team_id', 'teams', $onDelete: .setNull, $onUpdate: .noAction)
+        ->dropForeign('users_org_id_foreign');
+    assert(altered($g, $a) == 'ALTER TABLE `users` ADD COLUMN `nickname` VARCHAR(64) NULL, DROP COLUMN `legacy`, RENAME COLUMN `name` TO `full_name`, MODIFY COLUMN `email` VARCHAR(255) NOT NULL, ADD UNIQUE INDEX `users_nickname_unique` (`nickname`), ADD INDEX `by_name` (`full_name`), DROP INDEX `users_old_index`, ADD CONSTRAINT `users_team_id_foreign` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`) ON DELETE SET NULL ON UPDATE NO ACTION, DROP FOREIGN KEY `users_org_id_foreign`');
+}
+
+test tables_are_dropped_renamed_and_locked
+{
+    Mysql $g = Mysql();
+    assert($g->drop('users') == 'DROP TABLE `users`');
+    assert($g->drop('users', $exists: true) == 'DROP TABLE IF EXISTS `users`');
+    assert($g->rename('users', 'people') == 'RENAME TABLE `users` TO `people`');
+    // identifiers are quoted the way hydrahon quotes them
+    assert($g->drop('we`ird') == 'DROP TABLE `we``ird`');
+    assert($g->lock("app's", 10) == "SELECT GET_LOCK('app''s', 10)");
+    assert($g->unlock('carbon_migrations') == "SELECT RELEASE_LOCK('carbon_migrations')");
+    assert(!$g->transactional());
+}

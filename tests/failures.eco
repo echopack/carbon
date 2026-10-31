@@ -97,7 +97,7 @@ test a_changed_key_refuses_every_write
 test a_refused_delete_writes_nothing
 {
     $w = World();
-    $w->notes->observe(Refuser());
+    $w->db->observe<Note>(Refuser());
     $w->fake->rows([noteRow(4, 'Bin')]);
     Note $n = guard $w->notes->find()->one(4);
     assert(message($n->delete()) == 'refused: not today');
@@ -125,7 +125,7 @@ test an_insert_on_postgres_without_a_returned_row_is_missing
 {
     $fake = carbon::fake::Driver<hydrahon::Postgres>();
     $fake->rows([])->rows([[Value::from('seven')]]);
-    carbon::Db $db = carbon::Db($fake);
+    carbon::DB $db = carbon::DB($fake);
     guard $db->register<fixtures::NoteRepository>();
     fixtures::NoteRepository $notes = guard $db->session()->repo<fixtures::NoteRepository>();
     result<Note, Error> $none = $notes->create(Note($title: 'Pg'));
@@ -249,7 +249,7 @@ test a_hook_that_changes_the_key_is_refused
     $w = World();
     $w->fake->rows([[Value::from('Theme'), Value::from('dark')]]);
     Setting $s = guard $w->settings->find()->one('Theme');
-    $w->settings->observe(Lowercase());
+    $w->db->observe<Setting>(Lowercase());
     $s->value = 'light';
     // writing through the new key would update row theme, not row Theme
     assert(message($s->save()) == 'the key changed since the model was loaded');

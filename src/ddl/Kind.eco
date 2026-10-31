@@ -1,0 +1,54 @@
+namespace carbon::ddl;
+
+/**
+ * What a column holds, as a migration names it. A grammar turns it into its database's type:
+ * `string(190)` is `VARCHAR(190)` on MySQL.
+ */
+public enum Kind
+{
+    case bigint;
+    case int;
+    case smallint;
+    case tinyint;
+
+    /**
+     * A flag, `TINYINT(1)` on MySQL.
+     */
+    case bool;
+
+    /**
+     * Text of at most `$size` characters.
+     */
+    case string(uint32 $size);
+
+    /**
+     * Text of any length.
+     */
+    case text;
+    case json;
+    case decimal(uint8 $precision, uint8 $scale);
+    case float;
+    case double;
+    case date;
+    case datetime;
+    case time;
+
+    /**
+     * Raw bytes of any length.
+     */
+    case bytes;
+
+    /**
+     * Whether the kind is a whole number, the only kind that can be unsigned or count up.
+     */
+    public const function integer() : bool
+    {
+        return match ($this) {
+            Kind::bigint => true,
+            Kind::int => true,
+            Kind::smallint => true,
+            Kind::tinyint => true,
+            else => false,
+        };
+    }
+}

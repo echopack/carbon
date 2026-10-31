@@ -94,3 +94,23 @@ test a_refused_column_names_its_codec
     result<array<Profile>, Error> $e = $w->profiles->all();
     assert(str::from($e->failure()) == 'column tags was refused by its codec: a quote is never closed');
 }
+
+test every_json_codec_reads_and_writes_its_column
+{
+    $w = World();
+    fixtures::KitRepository $kits = guard $w->session->repo<fixtures::KitRepository>();
+    $w->fake->rows([[
+        Value::from(1), Value::from('["a","b"]'), Value::from('[1,2]'), Value::from('[1.5]'),
+        Value::from('[true,false]'), Value::from('{"k":"v"}'), Value::from('{"w":0.5}'),
+        Value::from('{"on":true}'),
+    ]]);
+    fixtures::Kit $k = guard $kits->find()->one(1);
+    assert($k->words->count() == 2 && $k->words[1] == 'b');
+    assert($k->ints[1] == 2 && $k->floats[0] == 1.5 && !$k->flags[1]);
+    assert($k->labels->get('k') == 'v' && $k->weights->get('w') == 0.5 && $k->switches->get('on'));
+    $k->ints[] = 3;
+    $w->fake->written(1);
+    guard $k->save();
+    assert($w->fake->last() == 'UPDATE `kits` SET `ints` = ? WHERE `kits`.`id` = ?');
+    assert($w->fake->sent(1, [Value::from('[1,2,3]'), Value::from(1)]));
+}

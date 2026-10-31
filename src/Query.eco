@@ -412,9 +412,10 @@ public interface Query<M, Q>
     /**
      * Call `$visit` with each matching model as it is read, without keeping them all. Stops at
      * the first failure, the visitor's included. Relations named with `with` are not loaded,
-     * since there is no batch to load them for. The rows are still streaming while `$visit`
-     * runs, and a MySQL connection runs nothing else meanwhile: a visitor that writes gets a
-     * driver error. Write from `each(batch:)` instead.
+     * since there is no batch to load them for. The rows are still streaming on the session's
+     * connection while `$visit` runs, and a MySQL connection runs nothing else meanwhile: a
+     * visitor that writes in the same session gets a driver error. Write from `each(batch:)`, or
+     * from another session, instead.
      */
     function each(function<status<Error>(M)> $visit) : status<Error>
     {

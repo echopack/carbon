@@ -5,6 +5,7 @@
 
 namespace fixtures;
 
+use std::time;
 use hydrahon::{Value, DateTime, Term, Field, Values, Table};
 use carbon::{Cursor, Event, Link, Problem};
 use carbon::change::{Changes, Snapshot};
@@ -103,16 +104,16 @@ public class SettingTable : hydrahon::Source, carbon::Schema<Setting, string>
         return $m->link;
     }
 
-    public const function stamp(Setting& $m, Event $event, DateTime $now) : void
+    public const function stamp(Setting& $m, Event $event, time::timestamp $now) : void
     {
     }
 
-    public const function trash(Setting& $m, DateTime? $at) : bool
+    public const function trash(Setting& $m, time::timestamp? $at) : bool
     {
         return false;
     }
 
-    public const function trashed(const Setting& $m) : DateTime?
+    public const function trashed(const Setting& $m) : time::timestamp?
     {
         return null;
     }

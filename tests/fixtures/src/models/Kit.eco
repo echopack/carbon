@@ -1,0 +1,41 @@
+namespace fixtures;
+
+/**
+ * A column through every JSON codec carbon brings that `Profile` leaves out. carbongen names
+ * carbon's codecs from a list of its own; regenerating this model is what tells the two apart
+ * the day one of them changes.
+ */
+#[carbon::model: 'kits']
+public class Kit : carbon::Model<Kit, KitRepository>
+{
+    public carbon::Link $link = .detached();
+
+    #[carbon::key]
+    public int64 $id = 0;
+
+    #[carbon::codec: 'json']
+    public array<string> $words = [];
+
+    #[carbon::codec: 'json']
+    public array<int64> $ints = [];
+
+    #[carbon::codec: 'json']
+    public array<float64> $floats = [];
+
+    #[carbon::codec: 'json']
+    public array<bool> $flags = [];
+
+    #[carbon::codec: 'json']
+    public map<string, string> $labels = [];
+
+    #[carbon::codec: 'json']
+    public map<string, float64> $weights = [];
+
+    #[carbon::codec: 'json']
+    public map<string, bool> $switches = [];
+
+    public function link() : carbon::Link&
+    {
+        return $this->link;
+    }
+}

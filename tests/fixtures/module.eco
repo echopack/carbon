@@ -10,7 +10,10 @@
 #[version: "0.1.0"]
 
 #[depends: "../.."]
+// World runs every test on the fake
+#[depends: "../../fake"]
 #[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echopack/calendar" { version: "^0.1", source: git "https://github.com/echopack/calendar" }]
 #[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
 
 #[sources: "src/**/*.eco"]

@@ -1,7 +1,7 @@
 /*
  * blog: carbon's example. Users write posts, posts get comments. Models,
  * repositories with their own finders and scopes, registered on a
- * carbon::Db. The tests run on carbon's fake driver; app/ is the
+ * carbon::DB. The tests run on carbon's fake driver; app/ is the
  * runnable side, on a real MySQL (scripts/run.sh starts one).
  */
 
@@ -10,6 +10,7 @@
 
 #[depends: "../.."]
 #[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echopack/calendar" { version: "^0.1", source: git "https://github.com/echopack/calendar" }]
 #[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
 
 #[sources: "src/**/*.eco"]
@@ -19,5 +20,7 @@
 #[end]
 
 #[target: test] {
+    // the fake driver the tests run on
+    #[depends: "../../fake"]
     #[sources: "tests/*.eco"]
 }

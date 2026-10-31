@@ -1,0 +1,18 @@
+namespace carbon::codec;
+
+/**
+ * `calendar::DateTime` as a DATETIME, as written, with no zone. carbongen picks it for every
+ * field of that type; no `#[carbon::codec]` needed.
+ */
+public struct Wall : carbon::Codec<calendar::DateTime, hydrahon::DateTime>
+{
+    public const function decode(hydrahon::DateTime $raw) : result<calendar::DateTime, carbon::Problem>
+    {
+        return carbon::Temporal::wall($raw);
+    }
+
+    public const function encode(const calendar::DateTime& $value) : hydrahon::DateTime
+    {
+        return carbon::Temporal::stored($value);
+    }
+}

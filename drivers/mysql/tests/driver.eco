@@ -21,6 +21,8 @@ test errors_map_onto_faults
     assert(fault(carbon::mysql::Driver::failure(server(.parse, '42000'))) == Fault::other);
     mysql::Error $closed = .closed;
     assert(fault(carbon::mysql::Driver::failure($closed)) == Fault::connection);
+    mysql::Error $none = .exhausted;
+    assert(fault(carbon::mysql::Driver::failure($none)) == Fault::exhausted);
 }
 
 test errors_keep_state_and_code
@@ -55,4 +57,13 @@ test params_bind_every_kind
     ]);
     mysql::Params $p = carbon::mysql::Params::of($from);
     assert($p->count() == 11);
+}
+
+test a_source_always_counts_matched_rows
+{
+    carbon::mysql::Source $s = guard carbon::mysql::Source::parse('mysql://app@127.0.0.1:3306/blog');
+    assert($s->traits()->matched && !$s->traits()->returning);
+    assert($s->pool->options->foundRows);
+    // nothing connects until a session runs a statement
+    assert($s->pool->open() == 0);
 }

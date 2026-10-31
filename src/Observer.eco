@@ -5,8 +5,8 @@ namespace carbon;
  * trail, a cache to drop. `before` may change the model or refuse the write with `.refused`;
  * `after` only hears about it. One observer serves every session, so each call is handed the
  * session the write runs in, and with it the context: `$session->get<Editor>()`. Register one
- * with `$repository->observe(...)`. A repository's own `before`/`after` run first and last,
- * around every observer.
+ * on the `DB` at startup, `$db->observe<Post>(...)`. A repository's own `before`/`after` run
+ * first and last, around every observer.
  */
 public interface Observer<M>
 {

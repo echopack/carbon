@@ -1,0 +1,373 @@
+namespace carbon::ddl;
+
+use carbon::Error;
+use hydrahon::Value;
+
+/**
+ * MySQL 8.0 and MariaDB 10.5 or later. Every statement is one line, and identifiers are quoted
+ * the way hydrahon's MySQL dialect quotes them.
+ */
+public class Mysql : Grammar
+{
+    private hydrahon::Mysql $dialect = hydrahon::Mysql();
+
+    public const function create(const Table& $table) : result<array<string>, Error>
+    {
+        if ($table->columns->count() == 0) {
+            return .error(.invalid("table {$table->name} has no columns"));
+        }
+        array<string> $parts = [];
+        foreach ($table->columns as const &$c) {
+            string $col = guard $this->column($c) else ($e) {
+                return .error($e);
+            }
+            $parts[] = mv $col;
+        }
+        if ($table->primary->count() > 0) {
+            $parts[] = "PRIMARY KEY ({$this->list($table->primary)})";
+        }
+        foreach ($table->indexes as const &$i) {
+            $parts[] = $this->index($table->name, $i);
+        }
+        foreach ($table->foreigns as const &$f) {
+            $parts[] = $this->foreign($table->name, $f);
+        }
+        string $out = 'CREATE TABLE ';
+        if ($table->missing) {
+            $out->append('IF NOT EXISTS ');
+        }
+        $out->append($this->name($table->name));
+        $out->append(' (');
+        $out->append(str::join($parts, ', '));
+        $out->append(')');
+        return .ok([$out]);
+    }
+
+    public const function alter(const Alter& $alter) : result<array<string>, Error>
+    {
+        if ($alter->changes->count() == 0) {
+            return .error(.invalid("altering {$alter->table} changes nothing"));
+        }
+        array<string> $parts = [];
+        foreach ($alter->changes as const &$change) {
+            match ($change) {
+                Change::add($c) => {
+                    string $col = guard $this->column($c) else ($e) {
+                        return .error($e);
+                    }
+                    $parts[] = "ADD COLUMN {$col}";
+                },
+                Change::drop($name) => {
+                    $parts[] = "DROP COLUMN {$this->name($name)}";
+                },
+                Change::rename($from, $to) => {
+                    $parts[] = "RENAME COLUMN {$this->name($from)} TO {$this->name($to)}";
+                },
+                Change::modify($c) => {
+                    string $col = guard $this->column($c) else ($e) {
+                        return .error($e);
+                    }
+                    $parts[] = "MODIFY COLUMN {$col}";
+                },
+                Change::index($i) => {
+                    $parts[] = "ADD {$this->index($alter->table, $i)}";
+                },
+                Change::dropIndex($name) => {
+                    $parts[] = "DROP INDEX {$this->name($name)}";
+                },
+                Change::foreign($f) => {
+                    $parts[] = "ADD {$this->foreign($alter->table, $f)}";
+                },
+                Change::dropForeign($name) => {
+                    $parts[] = "DROP FOREIGN KEY {$this->name($name)}";
+                },
+            };
+        }
+        string $out = "ALTER TABLE {$this->name($alter->table)} ";
+        $out->append(str::join($parts, ', '));
+        return .ok([$out]);
+    }
+
+    public const function drop(const string& $table, bool $exists = false) : string
+    {
+        if ($exists) {
+            return "DROP TABLE IF EXISTS {$this->name($table)}";
+        }
+        return "DROP TABLE {$this->name($table)}";
+    }
+
+    public const function rename(const string& $from, const string& $to) : string
+    {
+        return "RENAME TABLE {$this->name($from)} TO {$this->name($to)}";
+    }
+
+    public const function lock(const string& $name, uint32 $seconds) : string
+    {
+        string $quoted = Mysql::literal($name);
+        return "SELECT GET_LOCK({$quoted}, {$seconds})";
+    }
+
+    public const function unlock(const string& $name) : string
+    {
+        string $quoted = Mysql::literal($name);
+        return "SELECT RELEASE_LOCK({$quoted})";
+    }
+
+    public const function transactional() : bool
+    {
+        return false;
+    }
+
+    /**
+     * The column's definition: name, type, nullability, default and the rest.
+     */
+    private const function column(const Column& $c) : result<string, Error>
+    {
+        string $type = guard Mysql::type($c) else ($e) {
+            return .error($e);
+        }
+        string $out = "{$this->name($c->name)} {$type}";
+        if ($c->unsigned) {
+            if (!$c->kind->integer()) {
+                return .error(.invalid("column {$c->name}: only a whole number can be unsigned"));
+            }
+            $out->append(' UNSIGNED');
+        }
+        if ($c->nullable) {
+            $out->append(' NULL');
+        } else {
+            $out->append(' NOT NULL');
+        }
+        hydrahon::Value? $given = $c->default;
+        if ($given != null) {
+            if (!Mysql::defaults($c->kind)) {
+                return .error(.invalid("column {$c->name}: MySQL takes no default on a TEXT, JSON or BLOB column"));
+            }
+            hydrahon::Value $v = guard $given;
+            string $literal = Mysql::value($v);
+            $out->append(" DEFAULT {$literal}");
+        }
+        if ($c->increments) {
+            if (!$c->kind->integer()) {
+                return .error(.invalid("column {$c->name}: only a whole number can count up"));
+            }
+            $out->append(' AUTO_INCREMENT');
+        }
+        if ($c->primary) {
+            $out->append(' PRIMARY KEY');
+        }
+        if ($c->unique) {
+            $out->append(' UNIQUE');
+        }
+        return .ok($out);
+    }
+
+    private static function type(const Column& $c) : result<string, Error>
+    {
+        return match ($c->kind) {
+            Kind::bigint => .ok('BIGINT'),
+            Kind::int => .ok('INT'),
+            Kind::smallint => .ok('SMALLINT'),
+            Kind::tinyint => .ok('TINYINT'),
+            Kind::bool => .ok('TINYINT(1)'),
+            Kind::string($size) => Mysql::varchar($c->name, $size),
+            Kind::text => .ok('TEXT'),
+            Kind::json => .ok('JSON'),
+            Kind::decimal($p, $s) => Mysql::decimal($c->name, $p, $s),
+            Kind::float => .ok('FLOAT'),
+            Kind::double => .ok('DOUBLE'),
+            Kind::date => .ok('DATE'),
+            Kind::datetime => .ok('DATETIME'),
+            Kind::time => .ok('TIME'),
+            Kind::bytes => .ok('BLOB'),
+        };
+    }
+
+    private static function varchar(const string& $column, uint32 $size) : result<string, Error>
+    {
+        if ($size == 0 || $size > 16383) {
+            return .error(.invalid("column {$column}: a string holds 1 to 16383 characters, not {$size}"));
+        }
+        return .ok("VARCHAR({$size})");
+    }
+
+    private static function decimal(const string& $column, uint8 $precision, uint8 $scale) : result<string, Error>
+    {
+        if ($precision == 0 || $precision > 65 || $scale > 30 || $scale > $precision) {
+            return .error(.invalid("column {$column}: DECIMAL({$precision},{$scale}) needs 1 to 65 digits and a scale of at most 30, no more than the digits"));
+        }
+        return .ok("DECIMAL({$precision},{$scale})");
+    }
+
+    /**
+     * Whether a column of `$kind` can have a literal default.
+     */
+    private static function defaults(const Kind& $kind) : bool
+    {
+        return match ($kind) {
+            Kind::text => false,
+            Kind::json => false,
+            Kind::bytes => false,
+            else => true,
+        };
+    }
+
+    private const function index(const string& $table, const Index& $i) : string
+    {
+        if ($i->unique) {
+            return "UNIQUE INDEX {$this->name($i->named($table))} ({$this->list($i->columns)})";
+        }
+        return "INDEX {$this->name($i->named($table))} ({$this->list($i->columns)})";
+    }
+
+    private const function foreign(const string& $table, const Foreign& $f) : string
+    {
+        string $out = "CONSTRAINT {$this->name($f->named($table))} FOREIGN KEY ({$this->name($f->column)}) ";
+        $out->append("REFERENCES {$this->name($f->table)} ({$this->name($f->references)}) ");
+        string $onDelete = Mysql::action($f->onDelete);
+        string $onUpdate = Mysql::action($f->onUpdate);
+        $out->append("ON DELETE {$onDelete} ON UPDATE {$onUpdate}");
+        return $out;
+    }
+
+    private static function action(Action $a) : string
+    {
+        return match ($a) {
+            Action::restrict => 'RESTRICT',
+            Action::cascade => 'CASCADE',
+            Action::setNull => 'SET NULL',
+            Action::noAction => 'NO ACTION',
+        };
+    }
+
+    private const function name(const string& $ident) : string
+    {
+        str::text $t = str::text();
+        $this->dialect->quote($ident, $t);
+        return $t->take();
+    }
+
+    private const function list(const array<string>& $names) : string
+    {
+        array<string> $quoted = [];
+        foreach ($names as const &$n) {
+            $quoted[] = $this->name($n);
+        }
+        return str::join($quoted, ', ');
+    }
+
+    /**
+     * `$v` as an SQL literal, for a default: DDL takes no bound parameters.
+     */
+    public static function value(const Value& $v) : string
+    {
+        return match ($v) {
+            Value::none => 'NULL',
+            Value::bool($b) => Mysql::flag($b),
+            Value::int($n) => "{$n}",
+            Value::uint($n) => "{$n}",
+            Value::float($n) => "{$n}",
+            Value::decimal($d) => $d->text,
+            Value::text($s) => Mysql::literal($s),
+            Value::bytes($b) => Mysql::hex($b->data),
+            Value::date($d) => Mysql::quoted(Mysql::date($d->year, $d->month, $d->day)),
+            Value::datetime($t) => Mysql::stamp($t),
+            Value::time($t) => Mysql::time($t),
+        };
+    }
+
+    /**
+     * `$s` between single quotes, with quotes doubled and backslashes escaped: MySQL's default
+     * SQL mode reads backslash escapes in strings.
+     */
+    public static function literal(const string& $s) : string
+    {
+        string $out = "'";
+        usize $i = 0;
+        while ($i < $s->size()) {
+            uint8 $b = $s->byte($i);
+            if ($b == 39) {
+                $out->append("''");
+            } else if ($b == 92) {
+                $out->append('\\\\');
+            } else {
+                $out->push($b);
+            }
+            $i = $i + 1;
+        }
+        $out->append("'");
+        return $out;
+    }
+
+    private static function flag(bool $b) : string
+    {
+        if ($b) {
+            return '1';
+        }
+        return '0';
+    }
+
+    private static function hex(const string& $data) : string
+    {
+        string $digits = '0123456789ABCDEF';
+        string $out = "X'";
+        usize $i = 0;
+        while ($i < $data->size()) {
+            uint8 $b = $data->byte($i);
+            $out->push($digits->byte(($b >> 4) as usize));
+            $out->push($digits->byte(($b & 15) as usize));
+            $i = $i + 1;
+        }
+        $out->append("'");
+        return $out;
+    }
+
+    private static function date(uint16 $year, uint8 $month, uint8 $day) : string
+    {
+        string $y = Mysql::pad($year as uint32, 4);
+        string $m = Mysql::pad($month as uint32, 2);
+        string $d = Mysql::pad($day as uint32, 2);
+        return "{$y}-{$m}-{$d}";
+    }
+
+    private static function clock(uint32 $hours, uint8 $minute, uint8 $second, uint32 $micro) : string
+    {
+        string $h = Mysql::pad($hours, 2);
+        string $m = Mysql::pad($minute as uint32, 2);
+        string $s = Mysql::pad($second as uint32, 2);
+        string $out = "{$h}:{$m}:{$s}";
+        if ($micro > 0) {
+            string $us = Mysql::pad($micro, 6);
+            $out->append(".{$us}");
+        }
+        return $out;
+    }
+
+    private static function stamp(const hydrahon::DateTime& $t) : string
+    {
+        string $day = Mysql::date($t->year, $t->month, $t->day);
+        string $clock = Mysql::clock($t->hour as uint32, $t->minute, $t->second, $t->micro);
+        return Mysql::quoted("{$day} {$clock}");
+    }
+
+    private static function quoted(const string& $s) : string
+    {
+        return "'{$s}'";
+    }
+
+    private static function time(const hydrahon::Time& $t) : string
+    {
+        string $out = "'";
+        if ($t->negative) {
+            $out->append('-');
+        }
+        $out->append(Mysql::clock($t->hours, $t->minute, $t->second, $t->micro));
+        $out->append("'");
+        return $out;
+    }
+
+    private static function pad(uint32 $n, usize $width) : string
+    {
+        return str::lpad("{$n}", $width, 48);
+    }
+}

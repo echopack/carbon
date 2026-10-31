@@ -1,0 +1,87 @@
+namespace carbon;
+
+use carbon::ddl::{Grammar, Table, Alter};
+
+/**
+ * What a migration works with while it runs: schema changes spelled by the database's grammar,
+ * raw SQL, and the session for changing data. Every statement goes through the session's
+ * connection, so listeners hear it.
+ *
+ * A migration that changes data is best written with hydrahon or raw SQL against the tables as
+ * they are at that point: the models change after the migration is written, the migration
+ * does not.
+ */
+public class Migrating
+{
+    internal Session $session;
+    internal Grammar $grammar;
+
+    internal constructor(Session $session, Grammar $grammar)
+    {
+        $this->session = $session;
+        $this->grammar = $grammar;
+    }
+
+    public function create(const Table& $table) : status<Error>
+    {
+        array<string> $sql = guard $this->grammar->create($table) else ($e) { return .error($e); }
+        return $this->each($sql);
+    }
+
+    public function alter(const Alter& $alter) : status<Error>
+    {
+        array<string> $sql = guard $this->grammar->alter($alter) else ($e) { return .error($e); }
+        return $this->each($sql);
+    }
+
+    public function drop(const string& $table) : status<Error>
+    {
+        return $this->run($this->grammar->drop($table));
+    }
+
+    /**
+     * Drop `$table` if it is there.
+     */
+    public function dropIfExists(const string& $table) : status<Error>
+    {
+        return $this->run($this->grammar->drop($table, $exists: true));
+    }
+
+    public function rename(const string& $from, const string& $to) : status<Error>
+    {
+        return $this->run($this->grammar->rename($from, $to));
+    }
+
+    /**
+     * Run `$sql` as it is: what the grammar does not spell, in the database's own dialect.
+     */
+    public function run(const string& $sql) : status<Error>
+    {
+        guard $this->session->connection->run($sql) else ($e) { return .error($e); }
+        return .ok();
+    }
+
+    /**
+     * The session the migration runs in, for changing data.
+     */
+    public function session() : Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * The grammar the schema changes are spelled in.
+     */
+    public function grammar() : Grammar
+    {
+        return $this->grammar;
+    }
+
+    private function each(const array<string>& $sql) : status<Error>
+    {
+        foreach ($sql as const &$s) {
+            guard $this->run($s) else ($e) { return .error($e); }
+        }
+        return .ok();
+    }
+}

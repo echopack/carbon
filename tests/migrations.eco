@@ -1,0 +1,290 @@
+use carbon::{DB, Error, Migration, Migrating, Migrator};
+use std::time;
+use carbon::ddl::{Grammar, Table, Alter, Mysql};
+use carbon::migrate::{Step, Report};
+use carbon::fake;
+use hydrahon::{Value, DateTime};
+
+class CreateThings : Migration
+{
+    public function up(Migrating $m) : status<Error>
+    {
+        return $m->create(Table('things')->id()->string('name', 64));
+    }
+
+    public function down(Migrating $m) : status<Error>
+    {
+        return $m->drop('things');
+    }
+}
+
+class AddColour : Migration
+{
+    public function up(Migrating $m) : status<Error>
+    {
+        return $m->alter(Alter('things')->string('colour', 16, $nullable: true));
+    }
+
+    public function down(Migrating $m) : status<Error>
+    {
+        return $m->alter(Alter('things')->drop('colour'));
+    }
+}
+
+class Backfill : Migration
+{
+    public function up(Migrating $m) : status<Error>
+    {
+        return $m->run("UPDATE things SET colour = 'grey'");
+    }
+}
+
+/**
+ * MySQL's spelling, with schema changes that take part in transactions and no lock: what a
+ * Postgres grammar will look like to the migrator.
+ */
+class Transactional : Grammar
+{
+    public Mysql $mysql = Mysql();
+
+    public const function create(const Table& $table) : result<array<string>, Error> { return $this->mysql->create($table); }
+    public const function alter(const Alter& $alter) : result<array<string>, Error> { return $this->mysql->alter($alter); }
+    public const function drop(const string& $table, bool $exists = false) : string { return $this->mysql->drop($table, $exists); }
+    public const function rename(const string& $from, const string& $to) : string { return $this->mysql->rename($from, $to); }
+    public const function lock(const string& $name, uint32 $seconds) : string { return ''; }
+    public const function unlock(const string& $name) : string { return ''; }
+    public const function transactional() : bool { return true; }
+}
+
+function steps() : array<Step>
+{
+    // out of order on purpose: the migrator orders them by id
+    return [
+        Step('20261029120100_add_colour', AddColour(), true),
+        Step('20261029120000_create_things', CreateThings(), true),
+    ];
+}
+
+const string LEDGER = 'CREATE TABLE IF NOT EXISTS `carbon_migrations` (`id` VARCHAR(190) NOT NULL, `batch` BIGINT NOT NULL, `ran_at` DATETIME NOT NULL, PRIMARY KEY (`id`))';
+const string READ = 'SELECT `carbon_migrations`.`id`, `carbon_migrations`.`batch`, `carbon_migrations`.`ran_at` FROM `carbon_migrations` ORDER BY `carbon_migrations`.`id` ASC';
+const string INSERT = 'INSERT INTO `carbon_migrations` (`id`, `batch`, `ran_at`) VALUES (?, ?, ?)';
+const string DELETE = 'DELETE FROM `carbon_migrations` WHERE `carbon_migrations`.`id` = ?';
+const string LOCK = "SELECT GET_LOCK('carbon_migrations', 10)";
+const string UNLOCK = "SELECT RELEASE_LOCK('carbon_migrations')";
+
+function ran(const string& $id, int64 $batch) : array<Value>
+{
+    return [Value::from($id), Value::from($batch), Value::from(DateTime(2026, 10, 29))];
+}
+
+function locked() : array<array<Value>>
+{
+    return [[Value::from(1 as int64)]];
+}
+
+test up_runs_every_pending_migration_in_id_order_as_one_batch
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)->rows([])
+        ->written()->written()
+        ->written()->written()
+        ->rows(locked());
+    DB $db = DB($fake, clock: calendar::FixedClock(time::timestamp::from_unix_secs(1761739200)));
+    Migrator $m = Migrator($db, steps(), Mysql());
+    array<string> $done = guard $m->up();
+    assert($done->count() == 2);
+    assert($done[0] == '20261029120000_create_things');
+    assert($done[1] == '20261029120100_add_colour');
+    array<string> $sent = $fake->texts();
+    assert($sent->count() == 8);
+    assert($sent[0] == LOCK);
+    assert($sent[1] == LEDGER);
+    assert($sent[2] == READ);
+    assert($sent[3] == 'CREATE TABLE `things` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `name` VARCHAR(64) NOT NULL)');
+    assert($sent[4] == INSERT);
+    assert($fake->sent(4, [Value::from('20261029120000_create_things'), Value::from(1 as int64), Value::from(DateTime(2025, 10, 29, 12))]));
+    assert($sent[5] == 'ALTER TABLE `things` ADD COLUMN `colour` VARCHAR(16) NULL');
+    assert($sent[6] == INSERT);
+    assert($sent[7] == UNLOCK);
+}
+
+test up_skips_what_ran_and_numbers_the_next_batch
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)->rows([ran('20261029120000_create_things', 3)])
+        ->written()->written()
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake, clock: calendar::FixedClock(time::timestamp::from_unix_secs(0))), steps(), Mysql());
+    array<string> $done = guard $m->up();
+    assert($done->count() == 1);
+    assert($done[0] == '20261029120100_add_colour');
+    assert($fake->sent(4, [Value::from('20261029120100_add_colour'), Value::from(4 as int64), Value::from(DateTime(1970, 1, 1))]));
+}
+
+test up_to_stops_after_the_given_id
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)->rows([])->written()->written()->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    array<string> $done = guard $m->up(to: '20261029120000_create_things');
+    assert($done->count() == 1);
+    assert($fake->pending() == 0);
+
+    // an id the app does not have runs nothing, and still lets go of the lock
+    $fake->rows(locked())->rows(locked());
+    result<array<string>, Error> $none = $m->up(to: '20991231000000_nope');
+    assert(str::from($none->failure()) == 'invalid: no migration has the id 20991231000000_nope');
+    assert($fake->last() == UNLOCK);
+}
+
+test status_tells_applied_pending_and_unknown_apart
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)
+        ->rows([ran('20261029120000_create_things', 1), ran('20261101000000_from_elsewhere', 2)])
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    Report $r = guard $m->status();
+    assert($r->applied->count() == 2);
+    assert($r->applied[0]->batch == 1);
+    assert($r->pending->count() == 1 && $r->pending[0] == '20261029120100_add_colour');
+    assert($r->unknown->count() == 1 && $r->unknown[0] == '20261101000000_from_elsewhere');
+}
+
+test down_undoes_the_last_batch_newest_first
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)
+        ->rows([ran('20261029120000_create_things', 1), ran('20261029120100_add_colour', 1)])
+        ->written()->written()
+        ->written()->written()
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    array<string> $undone = guard $m->down();
+    assert($undone->count() == 2);
+    assert($undone[0] == '20261029120100_add_colour');
+    array<string> $sent = $fake->texts();
+    assert($sent[3] == 'ALTER TABLE `things` DROP COLUMN `colour`');
+    assert($sent[4] == DELETE);
+    assert($fake->sent(4, [Value::from('20261029120100_add_colour')]));
+    assert($sent[5] == 'DROP TABLE `things`');
+    assert($sent[6] == DELETE);
+}
+
+test down_leaves_earlier_batches_alone_and_reset_undoes_them_all
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())
+        // the last batch
+        ->written(0)->rows([ran('20261029120000_create_things', 1), ran('20261029120100_add_colour', 2)])
+        ->written()->written()
+        // the one before, the ledger made once already
+        ->rows([ran('20261029120000_create_things', 1)])
+        ->written()->written()
+        // nothing left
+        ->rows([])
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    array<string> $undone = guard $m->reset();
+    assert($undone->count() == 2);
+    assert($undone[0] == '20261029120100_add_colour');
+    assert($undone[1] == '20261029120000_create_things');
+    assert($fake->pending() == 0);
+}
+
+test down_refuses_a_batch_it_cannot_undo_before_running_anything
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    array<Step> $s = steps();
+    $s[] = Step('20261029120200_backfill', Backfill());
+    $fake->rows(locked())->written(0)
+        ->rows([ran('20261029120100_add_colour', 1), ran('20261029120200_backfill', 1)])
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake), $s, Mysql());
+    result<array<string>, Error> $r = $m->down();
+    assert(str::from($r->failure()) == 'migration 20261029120200_backfill has no down(), so its batch cannot be rolled back');
+    assert($fake->count() == 4);
+    assert($fake->last() == UNLOCK);
+
+    // nor one holding migrations the app does not have
+    $fake->rows(locked())->written(0)
+        ->rows([ran('20261029120100_add_colour', 1), ran('20261101000000_a', 1), ran('20261101000001_b', 1)])
+        ->rows(locked());
+    result<array<string>, Error> $u = $m->down();
+    assert(str::from($u->failure()) == 'the batch to roll back holds migrations this app does not have: 20261101000001_b, 20261101000000_a');
+    assert($fake->last() == UNLOCK);
+}
+
+test a_failed_migration_is_named_and_not_recorded
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->written(0)->rows([])
+        ->written()->written()
+        ->fails(fixtures::failure(.other))
+        ->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    result<array<string>, Error> $r = $m->up();
+    assert(str::from($r->failure()) == 'migration 20261029120100_add_colour: database error [23000]: refused by the fake; what it changed before failing stays, and it is not recorded as run');
+    // the first one ran and is recorded; nothing more was written after the failure
+    assert($fake->count() == 7);
+    assert($fake->texts()[4] == INSERT);
+    assert($fake->last() == UNLOCK);
+}
+
+test another_migrator_holding_the_lock_stops_this_one
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows([[Value::from(0 as int64)]]);
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    result<array<string>, Error> $r = $m->up();
+    assert(str::from($r->failure()) == 'another migrator is running');
+    assert($fake->count() == 1);
+
+    // GET_LOCK answers NULL on an error
+    $fake->rows([[Value::none]]);
+    $m->wait = 3;
+    assert($m->up()->failed());
+    assert($fake->last() == "SELECT GET_LOCK('carbon_migrations', 3)");
+}
+
+test two_migrations_with_one_id_are_refused
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows(locked())->rows(locked());
+    array<Step> $s = steps();
+    $s[] = Step('20261029120000_create_things', Backfill());
+    Migrator $m = Migrator(DB($fake), $s, Mysql());
+    assert(str::from($m->up()->failure()) == 'invalid: two migrations have the id 20261029120000_create_things');
+}
+
+test a_transactional_grammar_commits_each_migration_with_its_row
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->written(0)->rows([])
+        ->written()->written()
+        ->written()->fails(fixtures::failure(.duplicate));
+    Migrator $m = Migrator(DB($fake), steps(), Transactional(), $table: 'schema_log');
+    result<array<string>, Error> $r = $m->up();
+    assert(str::from($r->failure()) == 'migration 20261029120100_add_colour: database error [23000]: refused by the fake');
+    array<string> $sent = $fake->texts();
+    assert($sent[0] == 'CREATE TABLE IF NOT EXISTS `schema_log` (`id` VARCHAR(190) NOT NULL, `batch` BIGINT NOT NULL, `ran_at` DATETIME NOT NULL, PRIMARY KEY (`id`))');
+    assert($sent[2] == 'BEGIN');
+    assert($sent[5] == 'COMMIT');
+    assert($sent[6] == 'BEGIN');
+    assert($sent[9] == 'ROLLBACK');
+    assert($sent->count() == 10);
+}
+
+test a_migration_reaches_the_session_and_raw_sql
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->written()->written()->written();
+    DB $db = DB($fake);
+    Migrating $m = carbon::Migrating($db->session(), Mysql());
+    guard $m->dropIfExists('old');
+    guard $m->rename('a', 'b');
+    guard $m->run('SET foreign_key_checks = 0');
+    assert($fake->texts()[0] == 'DROP TABLE IF EXISTS `old`');
+    assert($fake->texts()[1] == 'RENAME TABLE `a` TO `b`');
+    assert(!$m->session()->inTransaction());
+}
