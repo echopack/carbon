@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+
+    steps:
+      # drivers/mysql depends on ../../../libmysql until a libmysql with Options->foundRows is
+      # released, so keep that layout: carbon and libmysql side by side
+      - uses: actions/checkout@v5
+        with:
+          path: carbon
+
+      - uses: actions/checkout@v5
+        with:
+          repository: echolang/libmysql
+          path: libmysql
+
+      - uses: echolang/setup-echo@v1
+
+      - name: carbon
+        working-directory: carbon
+        run: |
+          epm install
+          echoc test
+
+      - name: carbon-mysql
+        working-directory: carbon/drivers/mysql
+        run: |
+          epm install
+          echoc test
+
+      - name: carbongen
+        working-directory: carbon/cli
+        run: |
+          epm install
+          echoc test
