@@ -21,3 +21,20 @@ test a_decls_format_that_moved_is_named
     json::Value $empty = guard json::parse('{"modules": [{"name": "m", "declarations": []}]}');
     assert(Generator::unread($empty) == null);
 }
+
+test the_module_name_comes_from_the_manifest
+{
+    string $blog = Generator::named("/* blog */\n#[module: \"blog\"]\n#[version: \"0.1.0\"]\n") ?? '';
+    assert($blog == 'blog');
+    string $shop = Generator::named("#[module: 'shop']\n") ?? '';
+    assert($shop == 'shop');
+    assert(Generator::named("#[version: \"0.1.0\"]\n") == null);
+}
+
+test a_whole_program_is_cut_down_to_the_module
+{
+    json::Value $all = guard json::parse('{"modules":[{"name":"stdlib","declarations":[{"kind":"struct"}]},{"name":"blog","declarations":[{"kind":"class"}]}]}');
+    json::Value $local = guard Generator::only($all, 'blog');
+    assert(json::dump($local) == '{"modules":[{"name":"blog","declarations":[{"kind":"class"}]}]}');
+    assert(Generator::only($all, 'shop') == null);
+}

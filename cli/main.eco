@@ -13,6 +13,7 @@ function usage() : void
     io::println('  check            exit 1 when .carbon/models.eco is out of date');
     io::println('');
     io::println('  --echoc <path>   the compiler, default $ECHOC or echoc on PATH');
+    io::println('  --decls <file>   read echoc -p decls --decls-all output from <file> instead of running echoc');
     io::println('  --quiet          say nothing on success');
 }
 
@@ -26,6 +27,11 @@ while ($i < $argv->count()) {
     string $a = $argv[$i];
     if ($a == '--echoc' && $i + 1 < $argv->count()) {
         $generator->echoc = $argv[$i + 1];
+        $i = $i + 2;
+        continue;
+    }
+    if ($a == '--decls' && $i + 1 < $argv->count()) {
+        $generator->from = $argv[$i + 1];
         $i = $i + 2;
         continue;
     }

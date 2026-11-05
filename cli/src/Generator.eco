@@ -16,6 +16,13 @@ use std::io;
 public class Generator
 {
     public string $echoc = 'echoc';
+
+    /**
+     * A file holding `echoc -p decls --decls-all` output to read instead of running a decls pass
+     * of its own: how a build tool that already made one pass for several generators hands it
+     * over. Empty runs the pass.
+     */
+    public string $from = '';
     // the manifest check, the wiring hint and the messages spell out `.carbon/` as well
     public const string $target = '.carbon/models.eco';
     public bool $quiet = false;
@@ -32,7 +39,7 @@ public class Generator
         if (!Generator::wired($manifest)) {
             return .error(.input(Generator::wiring()));
         }
-        json::Value $decls = guard $this->decls() else ($e) {
+        json::Value $decls = guard $this->decls($manifest) else ($e) {
             return .error($e);
         }
         Schema $schema = Schema::read($decls);
@@ -81,9 +88,13 @@ public class Generator
         return .ok;
     }
 
-    private function decls() : result<json::Value, Failure>
+    private function decls(const string& $manifest) : result<json::Value, Failure>
     {
-        array<string> $args = ['build', '-p', 'decls', '--define', 'CARBON_NOGEN', '-o', 'ecobuild/carbongen-decls'];
+        if (!$this->from->empty()) {
+            return $this->read($manifest);
+        }
+        // a hook calling back into echoc would run itself again without --no-hooks
+        array<string> $args = ['build', '-p', 'decls', '--no-hooks', '--define', 'CARBON_NOGEN', '-o', 'ecobuild/carbongen-decls'];
         std::process::output $run = guard std::process::command($this->echoc, $args)->output() else ($e) {
             return .error(.input("could not run {$this->echoc}: {$e->message()}; pass --echoc <path> or set $ECHOC"));
         }
@@ -93,12 +104,93 @@ public class Generator
         if (Json::items($decls, 'modules')->count() == 0) {
             return .error(.tool("{$run->status}", $run->stderr));
         }
+        return Generator::checked($decls, $this->echoc);
+    }
+
+    /**
+     * The declarations of this module out of the file `--decls` names, which holds every
+     * module of the program: the ones of the dependencies are not this module's to generate.
+     */
+    private function read(const string& $manifest) : result<json::Value, Failure>
+    {
+        string $text = Sys::read($this->from);
+        if ($text->empty()) {
+            return .error(.input("could not read {$this->from}"));
+        }
+        json::Value $all = guard json::parse($text) else {
+            return .error(.input("{$this->from} is not the JSON echoc -p decls prints"));
+        }
+        string $name = guard Generator::named($manifest) else {
+            return .error(.input('module.eco names no module (#[module: "..."])'));
+        }
+        json::Value? $local = Generator::only($all, $name);
+        if ($local == null) {
+            return .error(.input("{$this->from} holds no declarations of module {$name}"));
+        }
+        json::Value $decls = guard $local;
+        return Generator::checked($decls, $this->from);
+    }
+
+    private static function checked(json::Value $decls, const string& $origin) : result<json::Value, Failure>
+    {
         string? $moved = Generator::unread($decls);
         if ($moved != null) {
             string $key = guard $moved;
-            return .error(.input("{$this->echoc} -p decls no longer gives declarations a '{$key}'; this carbongen reads the format of echoc 0.11, so update one or the other"));
+            return .error(.input("{$origin}: echoc -p decls no longer gives declarations a '{$key}'; this carbongen reads the format of echoc 0.11, so update one or the other"));
         }
         return .ok($decls);
+    }
+
+    /**
+     * The name `#[module: "..."]` gives in `$manifest`, null when it gives none.
+     */
+    public static function named(const string& $manifest) : string?
+    {
+        foreach (str::split($manifest, "\n") as const &$raw) {
+            string $line = string::from(str::trim($raw));
+            if (!$line->starts('#[module:')) {
+                continue;
+            }
+            // either quote: the manifest is Echo
+            string $quote = '"';
+            usize $open = $line->find($quote);
+            usize $single = $line->find("'");
+            if ($single < $open) {
+                $open = $single;
+                $quote = "'";
+            }
+            if ($open == $line->size()) {
+                return null;
+            }
+            string $rest = $line->sub($open + 1, $line->size() - $open - 1);
+            usize $close = $rest->find($quote);
+            if ($close == $rest->size()) {
+                return null;
+            }
+            string? $name = $rest->sub(0, $close);
+            return $name;
+        }
+        return null;
+    }
+
+    /**
+     * `$decls` cut down to the module called `$name`, in the shape a pass without
+     * `--decls-all` prints; null when no module has that name.
+     */
+    public static function only(const json::Value& $decls, const string& $name) : json::Value?
+    {
+        foreach (Json::items($decls, 'modules') as const &$m) {
+            if (Json::text($m, 'name') != $name) {
+                continue;
+            }
+            json::Value $list = json::arr();
+            $list[] = $m;
+            json::Value $out = json::object();
+            $out['modules'] = $list;
+            json::Value? $found = $out;
+            return $found;
+        }
+        return null;
     }
 
     /**

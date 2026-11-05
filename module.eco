@@ -36,6 +36,11 @@
 
 #[sources: "src/**/*.eco"]
 
+// carbongen, offered to the modules that depend on carbon: `epm run carbongen`, or a hook
+#[target: exe { name: "carbongen", entry: "cli/main.eco", public: true }] {
+    #[sources: ["cli/main.eco", "cli/src/*.eco"]]
+}
+
 #[target: test] {
     // the fake driver the tests run on, compiled in: carbon-fake depends on carbon
     #[sources: "fake/src/*.eco"]
