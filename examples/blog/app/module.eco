@@ -12,9 +12,7 @@
 #[depends: ".."]
 #[depends: "../../../drivers/mysql"]
 #[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
-// TEMPORARY: the local checkout until libmysql with Options->foundRows is released; then
-// back to #[requires: "echolang/libmysql" { version: "^0.1.2", source: git "https://github.com/echolang/libmysql" }]
-#[depends: "../../../../libmysql"]
+#[requires: "echolang/libmysql" { version: "^0.1.2", source: git "https://github.com/echolang/libmysql" }]
 
 #[sources: "main.eco"]
 
