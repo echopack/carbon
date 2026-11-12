@@ -35,6 +35,12 @@ jobs:
           epm install
           echoc test
 
+      - name: carbon-pgsql
+        working-directory: drivers/pgsql
+        run: |
+          epm install
+          echoc test
+
       - name: carbongen
         working-directory: cli
         run: |

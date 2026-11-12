@@ -53,6 +53,16 @@ public class Migrating
     }
 
     /**
+     * Move the counter of `$column` in `$table` past the largest key there, after a seed or any
+     * other insert that wrote keys of its own. A PostgreSQL identity would otherwise count from
+     * where it was and collide with them; on MySQL nothing is run.
+     */
+    public function advance(const string& $table, const string& $column = 'id') : status<Error>
+    {
+        return $this->each($this->grammar->advance($table, $column));
+    }
+
+    /**
      * Run `$sql` as it is: what the grammar does not spell, in the database's own dialect.
      */
     public function run(const string& $sql) : status<Error>

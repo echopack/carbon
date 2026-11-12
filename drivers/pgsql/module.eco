@@ -1,0 +1,30 @@
+/*
+ * carbon-pgsql: carbon's driver for PostgreSQL, on libpgsql.
+ *
+ * Renders hydrahon statements in the Postgres dialect, binds their parameters,
+ * streams rows through libpgsql's RowView, and maps SQLSTATEs onto carbon's
+ * faults. Inserted keys come back through RETURNING, and an UPDATE counts the
+ * rows it matched, so stale writes are noticed without asking.
+ */
+
+#[module: "carbon-pgsql"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "the postgresql driver for carbon, on libpgsql"]
+
+#[depends: "../.."]
+#[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echopack/calendar" { version: "^0.1", source: git "https://github.com/echopack/calendar" }]
+#[requires: "echolang/libpgsql" { version: "^0.1", source: git "https://github.com/echolang/libpgsql" }]
+
+#[sources: "src/*.eco"]
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+
+    // scripts/test-live.sh: the blog example against a real server
+    #[if: live]
+    #[depends: "../../examples/blog"]
+    #[sources: "tests/live/*.eco"]
+    #[end]
+}

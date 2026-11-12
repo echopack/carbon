@@ -12,6 +12,21 @@ public interface Cursor
      */
     function step() : result<bool, Error>;
 
+    /**
+     * Step past every row left, so the connection is free for the next statement: a streaming
+     * result left open refuses every statement after it.
+     */
+    function drain() : status<Error>
+    {
+        while (true) {
+            bool $more = guard $this->step() else ($e) { return .error($e); }
+            if (!$more) {
+                return .ok();
+            }
+        }
+        return .ok();
+    }
+
     const function isNull(usize $at) : bool;
     const function bool(usize $at) : bool?;
     const function int(usize $at) : int64?;

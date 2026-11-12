@@ -1,0 +1,74 @@
+{
+  "lockVersion": 2,
+  "packages": [
+    {
+      "name": "echolang/libjson",
+      "version": "0.1.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "b51ff583dac2efb54fcf651652af97f76ba5c9bd",
+      "sha256": "0319758a7bc1dae16929b97070475ae1aee0a1ba262dc6279b5e3f0ec637ff6b",
+      "requires": []
+    },
+    {
+      "name": "echopack/calendar",
+      "version": "0.1.2",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/calendar"
+      },
+      "rev": "b2ef806e2572fc3f363392fdb9e8cb81dc9bdc62",
+      "sha256": "f4cceef46e395e35d00e90a453dd244cc75529f2daff5643381751725ae81d18",
+      "requires": []
+    },
+    {
+      "name": "echopack/hydrahon",
+      "version": "0.1.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/hydrahon"
+      },
+      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
+      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
+      "requires": []
+    },
+    {
+      "name": "echolang/libpgsql",
+      "version": "0.1.1",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libpgsql"
+      },
+      "rev": "3743684bd3aba45418043450a1f2831fb461f846",
+      "sha256": "d4fd47a9f7c883536772f596e84ee1d79d345f9d511043a5ff2f340c22628227",
+      "requires": [
+        "echolang/libtcp",
+        "echolang/libcrypto"
+      ]
+    },
+    {
+      "name": "echolang/libcrypto",
+      "version": "0.3.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libcrypto"
+      },
+      "rev": "3fba8f815d9e64bdad62e2b7182322061690ce39",
+      "sha256": "967109386299591b31f1a257597e6931800e241435b3b81b959404149e49e343",
+      "requires": []
+    },
+    {
+      "name": "echolang/libtcp",
+      "version": "0.2.1",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libtcp"
+      },
+      "rev": "f57391e3041ce5e9b349252628a891fc988281c7",
+      "sha256": "fdc8eac15e739aca853d872a864c1dfb96fecfe6f375344803c382afefb0e8eb",
+      "requires": []
+    }
+  ]
+}

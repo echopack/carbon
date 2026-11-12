@@ -1,0 +1,51 @@
+namespace carbon::pgsql;
+
+/**
+ * carbon on PostgreSQL with a connection per session, from a libpgsql pool. A session borrows one
+ * with its first statement and gives it back when it is gone, so the transactions of two
+ * sessions, or two threads, never mix.
+ *
+ * ```echo
+ * carbon::pgsql::Source $source = guard carbon::pgsql::Source::parse('postgres://app:secret@127.0.0.1/blog');
+ * carbon::DB $db = carbon::DB($source);
+ * guard $db->register<PostRepository>();
+ * ```
+ *
+ * The pool is shared by every thread of a sealed `DB`; each session's connection is its own. A
+ * connection given back inside a transaction is rolled back by the pool.
+ */
+#[atomic]
+public class Source : carbon::Source
+{
+    public pgsql::Pool $pool;
+
+    public constructor(pgsql::Options $options, pgsql::PoolOptions $limits = pgsql::PoolOptions())
+    {
+        $this->pool = pgsql::Pool($options, $limits);
+    }
+
+    /**
+     * A pool for `postgres://user:password@host:port/database`. Nothing connects until a session
+     * runs its first statement.
+     */
+    public static function parse(const string& $url) : result<Source, Error>
+    {
+        pgsql::Options $o = guard pgsql::Options::parse($url) else ($e) { return .error(Driver::failure($e)); }
+        return .ok(Source($o));
+    }
+
+    /**
+     * A connection borrowed from the pool, given back when the session lets go of it.
+     */
+    public function open() : result<carbon::Driver, Error>
+    {
+        pgsql::Lease $lease = guard $this->pool->acquire() else ($e) { return .error(Driver::failure($e)); }
+        carbon::Driver $d = Driver(lease: $lease);
+        return .ok($d);
+    }
+
+    public const function traits() : Traits
+    {
+        return Traits(true, true);
+    }
+}

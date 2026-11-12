@@ -1,0 +1,118 @@
+namespace carbon::pgsql;
+
+/**
+ * Rows streamed from the server, read in place through libpgsql's `RowView`. Dropping the cursor
+ * drains what is left, so the connection is free for the next statement.
+ */
+internal class Cursor : carbon::Cursor
+{
+    internal pgsql::Rows $rows;
+
+    public function step() : result<bool, Error>
+    {
+        bool $more = guard $this->rows->step() else ($e) { return .error(Driver::failure($e)); }
+        return .ok($more);
+    }
+
+    public const function isNull(usize $at) : bool
+    {
+        return $this->rows->view()->isNull($at);
+    }
+
+    public const function bool(usize $at) : bool?
+    {
+        return $this->rows->view()->bool($at);
+    }
+
+    public const function int(usize $at) : int64?
+    {
+        return $this->rows->view()->int($at);
+    }
+
+    /**
+     * Postgres has no unsigned integers: a whole number that is not negative.
+     */
+    public const function uint(usize $at) : uint64?
+    {
+        int64 $n = guard $this->rows->view()->int($at) else { return null; }
+        if ($n < 0) {
+            return null;
+        }
+        return $n as uint64;
+    }
+
+    public const function float(usize $at) : float64?
+    {
+        return $this->rows->view()->float($at);
+    }
+
+    public const function text(usize $at) : string?
+    {
+        return $this->rows->view()->text($at);
+    }
+
+    /**
+     * A NUMERIC as the server wrote it, nothing rounded.
+     */
+    public const function decimal(usize $at) : hydrahon::Decimal?
+    {
+        string $digits = guard $this->rows->view()->text($at) else { return null; }
+        return hydrahon::Decimal(mv $digits);
+    }
+
+    public const function bytes(usize $at) : hydrahon::Bytes?
+    {
+        string $data = guard $this->rows->view()->bytes($at) else { return null; }
+        return hydrahon::Bytes(mv $data);
+    }
+
+    /**
+     * A DATE. Infinity and years before 1 or past 65535 have no hydrahon date.
+     */
+    public const function date(usize $at) : hydrahon::Date?
+    {
+        pgsql::Date $d = guard $this->rows->view()->date($at) else { return null; }
+        if ($d->infinite() || $d->year < 1 || $d->year > 65535) {
+            return null;
+        }
+        return hydrahon::Date($d->year as uint16, $d->month, $d->day);
+    }
+
+    /**
+     * A TIMESTAMP, or a TIMESTAMPTZ in UTC.
+     */
+    public const function datetime(usize $at) : hydrahon::DateTime?
+    {
+        pgsql::DateTime $d = guard $this->rows->view()->datetime($at) else { return null; }
+        if ($d->infinite() || $d->year < 1 || $d->year > 65535) {
+            return null;
+        }
+        return hydrahon::DateTime($d->year as uint16, $d->month, $d->day, $d->hour, $d->minute, $d->second, $d->micro);
+    }
+
+    /**
+     * A TIME, or an INTERVAL of no months and no days, which may be negative or past a day.
+     */
+    public const function time(usize $at) : hydrahon::Time?
+    {
+        pgsql::Value $v = guard $this->rows->view()->value($at) else { return null; }
+        pgsql::Time? $clock = $v->time();
+        if ($clock != null) {
+            pgsql::Time $t = guard $clock;
+            return hydrahon::Time(false, $t->hour as uint32, $t->minute, $t->second, $t->micro);
+        }
+        pgsql::Interval $i = guard $v->interval() else { return null; }
+        if ($i->months != 0 || $i->days != 0) {
+            return null;
+        }
+        bool $negative = $i->micros < 0;
+        uint64 $us = 0;
+        if ($negative) {
+            $us = (0 - $i->micros) as uint64;
+        } else {
+            $us = $i->micros as uint64;
+        }
+        uint64 $secs = $us / 1000000;
+        return hydrahon::Time($negative, ($secs / 3600) as uint32, (($secs / 60) % 60) as uint8, ($secs % 60) as uint8, ($us % 1000000) as uint32);
+    }
+}

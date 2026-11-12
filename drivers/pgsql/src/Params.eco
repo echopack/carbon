@@ -1,0 +1,135 @@
+namespace carbon::pgsql;
+
+/**
+ * Binds hydrahon's parameters as libpgsql values. The server says what type each parameter is,
+ * and libpgsql writes the value in that type, so text bound to a JSONB column arrives as JSON.
+ */
+internal struct Params : hydrahon::Binder
+{
+    public array<pgsql::Value> $values = [];
+
+    public static function of(const hydrahon::Params& $from) : pgsql::Params
+    {
+        Params $b = Params();
+        foreach ($from as const &$v) {
+            $b->value($v);
+        }
+        return pgsql::Params::of(mv $b->values);
+    }
+
+    internal function value(const hydrahon::Value& $v) : void
+    {
+        match ($v) {
+            hydrahon::Value::none => {
+                $this->none();
+            },
+            hydrahon::Value::bool($x) => {
+                $this->bool($x);
+            },
+            hydrahon::Value::int($x) => {
+                $this->int($x);
+            },
+            hydrahon::Value::uint($x) => {
+                $this->uint($x);
+            },
+            hydrahon::Value::float($x) => {
+                $this->float($x);
+            },
+            hydrahon::Value::decimal($x) => {
+                $this->decimal($x);
+            },
+            hydrahon::Value::text($x) => {
+                $this->text($x);
+            },
+            hydrahon::Value::bytes($x) => {
+                $this->bytes($x);
+            },
+            hydrahon::Value::date($x) => {
+                $this->date($x);
+            },
+            hydrahon::Value::datetime($x) => {
+                $this->datetime($x);
+            },
+            hydrahon::Value::time($x) => {
+                $this->time($x);
+            },
+        };
+    }
+
+    public function none() : void
+    {
+        $this->values[] = pgsql::Value::none;
+    }
+
+    public function bool(bool $v) : void
+    {
+        $this->values[] = pgsql::Value::bool($v);
+    }
+
+    public function int(int64 $v) : void
+    {
+        $this->values[] = pgsql::Value::int($v);
+    }
+
+    /**
+     * Postgres has no unsigned integers: one past `int64` goes over as a NUMERIC.
+     */
+    public function uint(uint64 $v) : void
+    {
+        if ($v > 9223372036854775807) {
+            $this->values[] = pgsql::Value::numeric("{$v}");
+            return;
+        }
+        $this->values[] = pgsql::Value::int($v as int64);
+    }
+
+    public function float(float64 $v) : void
+    {
+        $this->values[] = pgsql::Value::float($v);
+    }
+
+    public function decimal(const hydrahon::Decimal& $v) : void
+    {
+        $this->values[] = pgsql::Value::numeric($v->text);
+    }
+
+    public function text(const string& $v) : void
+    {
+        $this->values[] = pgsql::Value::text($v);
+    }
+
+    public function bytes(const hydrahon::Bytes& $v) : void
+    {
+        $this->values[] = pgsql::Value::bytes($v->data);
+    }
+
+    public function date(const hydrahon::Date& $v) : void
+    {
+        $this->values[] = pgsql::Value::date(pgsql::Date($v->year as int32, $v->month, $v->day));
+    }
+
+    /**
+     * A TIMESTAMP without a zone: carbon keeps its stamps in UTC.
+     */
+    public function datetime(const hydrahon::DateTime& $v) : void
+    {
+        $this->values[] = pgsql::Value::timestamp(pgsql::DateTime($v->year as int32, $v->month, $v->day, $v->hour, $v->minute, $v->second, $v->micro));
+    }
+
+    /**
+     * A time of day. One that is negative or past a day is a duration, and goes over as an
+     * INTERVAL.
+     */
+    public function time(const hydrahon::Time& $v) : void
+    {
+        if (!$v->negative && $v->hours < 24) {
+            $this->values[] = pgsql::Value::time(pgsql::Time($v->hours as uint8, $v->minute, $v->second, $v->micro));
+            return;
+        }
+        int64 $micros = (($v->hours as int64 * 60 + $v->minute as int64) * 60 + $v->second as int64) * 1000000 + $v->micro as int64;
+        if ($v->negative) {
+            $micros = 0 - $micros;
+        }
+        $this->values[] = pgsql::Value::interval(pgsql::Interval(0, 0, $micros));
+    }
+}

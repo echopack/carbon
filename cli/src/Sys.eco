@@ -1,11 +1,9 @@
 /**
- * File helpers on top of std::io: reads that treat missing as empty, and
+ * File helpers on top of std::fs: reads that treat missing as empty, and
  * writes that leave an unchanged file alone.
  */
 
 namespace carbongen;
-
-use std::io;
 
 public struct Sys
 {
@@ -14,7 +12,7 @@ public struct Sys
      */
     public static function read(const string& $path) : string
     {
-        return io::readfile($path)->or('');
+        return std::fs::readfile($path)->or('');
     }
 
     /**
@@ -26,7 +24,7 @@ public struct Sys
         if (Sys::read($path) == $text) {
             return true;
         }
-        guard io::writefile($path, $text) else {
+        guard std::fs::writefile($path, $text) else {
             return false;
         }
         return true;

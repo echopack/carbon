@@ -32,15 +32,7 @@ public class Mysql : Grammar
         foreach ($table->foreigns as const &$f) {
             $parts[] = $this->foreign($table->name, $f);
         }
-        string $out = 'CREATE TABLE ';
-        if ($table->missing) {
-            $out->append('IF NOT EXISTS ');
-        }
-        $out->append($this->name($table->name));
-        $out->append(' (');
-        $out->append(str::join($parts, ', '));
-        $out->append(')');
-        return .ok([$out]);
+        return .ok([Literal::table($this->dialect, $table, $parts)]);
     }
 
     public const function alter(const Alter& $alter) : result<array<string>, Error>
@@ -90,10 +82,7 @@ public class Mysql : Grammar
 
     public const function drop(const string& $table, bool $exists = false) : string
     {
-        if ($exists) {
-            return "DROP TABLE IF EXISTS {$this->name($table)}";
-        }
-        return "DROP TABLE {$this->name($table)}";
+        return Literal::drop($this->dialect, $table, $exists);
     }
 
     public const function rename(const string& $from, const string& $to) : string
@@ -222,38 +211,17 @@ public class Mysql : Grammar
 
     private const function foreign(const string& $table, const Foreign& $f) : string
     {
-        string $out = "CONSTRAINT {$this->name($f->named($table))} FOREIGN KEY ({$this->name($f->column)}) ";
-        $out->append("REFERENCES {$this->name($f->table)} ({$this->name($f->references)}) ");
-        string $onDelete = Mysql::action($f->onDelete);
-        string $onUpdate = Mysql::action($f->onUpdate);
-        $out->append("ON DELETE {$onDelete} ON UPDATE {$onUpdate}");
-        return $out;
-    }
-
-    private static function action(Action $a) : string
-    {
-        return match ($a) {
-            Action::restrict => 'RESTRICT',
-            Action::cascade => 'CASCADE',
-            Action::setNull => 'SET NULL',
-            Action::noAction => 'NO ACTION',
-        };
+        return Literal::foreign($this->dialect, $table, $f);
     }
 
     private const function name(const string& $ident) : string
     {
-        str::text $t = str::text();
-        $this->dialect->quote($ident, $t);
-        return $t->take();
+        return Literal::name($this->dialect, $ident);
     }
 
     private const function list(const array<string>& $names) : string
     {
-        array<string> $quoted = [];
-        foreach ($names as const &$n) {
-            $quoted[] = $this->name($n);
-        }
-        return str::join($quoted, ', ');
+        return Literal::list($this->dialect, $names);
     }
 
     /**
@@ -261,19 +229,7 @@ public class Mysql : Grammar
      */
     public static function value(const Value& $v) : string
     {
-        return match ($v) {
-            Value::none => 'NULL',
-            Value::bool($b) => Mysql::flag($b),
-            Value::int($n) => "{$n}",
-            Value::uint($n) => "{$n}",
-            Value::float($n) => "{$n}",
-            Value::decimal($d) => $d->text,
-            Value::text($s) => Mysql::literal($s),
-            Value::bytes($b) => Mysql::hex($b->data),
-            Value::date($d) => Mysql::quoted(Mysql::date($d->year, $d->month, $d->day)),
-            Value::datetime($t) => Mysql::stamp($t),
-            Value::time($t) => Mysql::time($t),
-        };
+        return Literal::value($v, .mysql);
     }
 
     /**
@@ -282,92 +238,6 @@ public class Mysql : Grammar
      */
     public static function literal(const string& $s) : string
     {
-        string $out = "'";
-        usize $i = 0;
-        while ($i < $s->size()) {
-            uint8 $b = $s->byte($i);
-            if ($b == 39) {
-                $out->append("''");
-            } else if ($b == 92) {
-                $out->append('\\\\');
-            } else {
-                $out->push($b);
-            }
-            $i = $i + 1;
-        }
-        $out->append("'");
-        return $out;
-    }
-
-    private static function flag(bool $b) : string
-    {
-        if ($b) {
-            return '1';
-        }
-        return '0';
-    }
-
-    private static function hex(const string& $data) : string
-    {
-        string $digits = '0123456789ABCDEF';
-        string $out = "X'";
-        usize $i = 0;
-        while ($i < $data->size()) {
-            uint8 $b = $data->byte($i);
-            $out->push($digits->byte(($b >> 4) as usize));
-            $out->push($digits->byte(($b & 15) as usize));
-            $i = $i + 1;
-        }
-        $out->append("'");
-        return $out;
-    }
-
-    private static function date(uint16 $year, uint8 $month, uint8 $day) : string
-    {
-        string $y = Mysql::pad($year as uint32, 4);
-        string $m = Mysql::pad($month as uint32, 2);
-        string $d = Mysql::pad($day as uint32, 2);
-        return "{$y}-{$m}-{$d}";
-    }
-
-    private static function clock(uint32 $hours, uint8 $minute, uint8 $second, uint32 $micro) : string
-    {
-        string $h = Mysql::pad($hours, 2);
-        string $m = Mysql::pad($minute as uint32, 2);
-        string $s = Mysql::pad($second as uint32, 2);
-        string $out = "{$h}:{$m}:{$s}";
-        if ($micro > 0) {
-            string $us = Mysql::pad($micro, 6);
-            $out->append(".{$us}");
-        }
-        return $out;
-    }
-
-    private static function stamp(const hydrahon::DateTime& $t) : string
-    {
-        string $day = Mysql::date($t->year, $t->month, $t->day);
-        string $clock = Mysql::clock($t->hour as uint32, $t->minute, $t->second, $t->micro);
-        return Mysql::quoted("{$day} {$clock}");
-    }
-
-    private static function quoted(const string& $s) : string
-    {
-        return "'{$s}'";
-    }
-
-    private static function time(const hydrahon::Time& $t) : string
-    {
-        string $out = "'";
-        if ($t->negative) {
-            $out->append('-');
-        }
-        $out->append(Mysql::clock($t->hours, $t->minute, $t->second, $t->micro));
-        $out->append("'");
-        return $out;
-    }
-
-    private static function pad(uint32 $n, usize $width) : string
-    {
-        return str::lpad("{$n}", $width, 48);
+        return Literal::text($s, .mysql);
     }
 }

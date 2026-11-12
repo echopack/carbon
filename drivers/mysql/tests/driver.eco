@@ -18,6 +18,8 @@ test errors_map_onto_faults
     assert(fault(carbon::mysql::Driver::failure(server(.badNull, '23000'))) == Fault::constraint);
     assert(fault(carbon::mysql::Driver::failure(server(.deadlock, '40001'))) == Fault::deadlock);
     assert(fault(carbon::mysql::Driver::failure(server(.lockWaitTimeout, 'HY000'))) == Fault::deadlock);
+    // MariaDB's snapshot isolation: record has changed since last read
+    assert(fault(carbon::mysql::Driver::failure(server(mysql::ErrorCode::from(1020), 'HY000'))) == Fault::deadlock);
     assert(fault(carbon::mysql::Driver::failure(server(.parse, '42000'))) == Fault::other);
     mysql::Error $closed = .closed;
     assert(fault(carbon::mysql::Driver::failure($closed)) == Fault::connection);

@@ -13,13 +13,14 @@ use carbon::migrate::{Step, Applied, Report, Ledger};
  * ```
  *
  * Everything runs in a session of its own, on one connection, holding the database's lock for
- * migrations (`GET_LOCK` on MySQL) so two copies of the app starting together do not run the
- * same migration twice. The other one waits up to `$wait` seconds, then gets `.locked`.
+ * migrations (`GET_LOCK` on MySQL, an advisory lock on PostgreSQL) so two copies of the app
+ * starting together do not run the same migration twice. The other one waits up to `$wait`
+ * seconds, then gets `.locked`.
  *
- * Where the grammar's schema changes are transactional, a migration and its ledger row commit
- * together. Elsewhere (MySQL commits every schema change on its own) a migration that fails
- * halfway leaves what it changed before failing, and is not recorded as run: one schema change
- * per migration keeps that from hurting.
+ * Where the grammar's schema changes are transactional (PostgreSQL), a migration and its ledger
+ * row commit together. Elsewhere (MySQL commits every schema change on its own) a migration
+ * that fails halfway leaves what it changed before failing, and is not recorded as run: one
+ * schema change per migration keeps that from hurting.
  */
 public class Migrator
 {
@@ -269,29 +270,66 @@ public class Migrator
     /**
      * Run `$work` holding the database's lock for migrations, and let go of it after, whatever
      * `$work` answered.
+     *
+     * The lock belongs to the connection, not to a transaction, so a connection that may still
+     * hold it after a failure is discarded: back in a pool it would keep every later migrator
+     * out.
      */
     internal function locked<T>(function<result<T, Error>()> $work) : result<T, Error>
     {
         $this->prepared = false;
-        string $take = $this->grammar->lock($this->ledger->name, $this->wait);
+        uint32 $each = 1;
+        if ($this->wait == 0) {
+            $each = 0;
+        }
+        string $take = $this->grammar->lock($this->ledger->name, $each);
         if ($take->size() == 0) {
             return $work();
         }
         guard $this->acquire($take) else ($e) { return .error($e); }
         result<T, Error> $done = $work();
         status<Error> $let = $this->release($this->grammar->unlock($this->ledger->name));
-        if ($let->failed() && !$done->failed()) {
-            return .error($let->failure());
+        if ($let->failed()) {
+            $this->session->connection->discard();
+            if (!$done->failed()) {
+                return .error($let->failure());
+            }
         }
         return $done;
     }
 
     /**
-     * Take the lock with `$sql`. The answer's cursor is read to its end here, so the connection
-     * is free again before the work runs: a streaming result left open refuses every statement
-     * after it.
+     * Take the lock with `$sql`, which waits up to a second, asking again until `$wait` seconds
+     * have passed. One statement waiting all of them could run into the connection's timeout,
+     * and come back as a failed connection rather than `.locked`.
      */
     internal function acquire(const string& $sql) : status<Error>
+    {
+        uint32 $tries = $this->wait;
+        if ($tries == 0) {
+            $tries = 1;
+        }
+        uint32 $i = 0;
+        while ($i < $tries) {
+            bool $got = guard $this->attempt($sql) else ($e) {
+                // the server may have granted it after the client gave up waiting
+                $this->session->connection->discard();
+                return .error($e);
+            }
+            if ($got) {
+                return .ok();
+            }
+            $i = $i + 1;
+        }
+        return .error(.locked);
+    }
+
+    /**
+     * Ask for the lock with `$sql`, which answers 1 once it is held. The answer's cursor is read
+     * to its end here, so the connection is free again before the work runs: a streaming result
+     * left open refuses every statement after it.
+     */
+    internal function attempt(const string& $sql) : result<bool, Error>
     {
         Cursor $rows = guard $this->session->connection->ask($sql) else ($e) { return .error($e); }
         bool $one = guard $rows->step() else ($e) { return .error($e); }
@@ -299,28 +337,14 @@ public class Migrator
         if ($one) {
             $got = $rows->int(0);
         }
-        guard Migrator::drain($rows) else ($e) { return .error($e); }
-        if (($got ?? 0) != 1) {
-            return .error(.locked);
-        }
-        return .ok();
+        guard $rows->drain() else ($e) { return .error($e); }
+        return .ok(($got ?? 0) == 1);
     }
 
     internal function release(const string& $sql) : status<Error>
     {
         Cursor $rows = guard $this->session->connection->ask($sql) else ($e) { return .error($e); }
-        return Migrator::drain($rows);
-    }
-
-    internal static function drain(Cursor $rows) : status<Error>
-    {
-        while (true) {
-            bool $more = guard $rows->step() else ($e) { return .error($e); }
-            if (!$more) {
-                return .ok();
-            }
-        }
-        return .ok();
+        return $rows->drain();
     }
 
     internal const function knows(const string& $id) : bool

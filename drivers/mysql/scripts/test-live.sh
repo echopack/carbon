@@ -27,14 +27,21 @@ trap 'docker rm -f -v "$NAME" >/dev/null 2>&1 || true' EXIT
 # until a TCP login inside the container works
 echo "waiting for $IMAGE on 127.0.0.1:$PORT"
 CLIENT=mysql
+READY=
 for _ in $(seq 1 120); do
     if docker exec "$NAME" sh -c 'command -v mysql' >/dev/null 2>&1; then CLIENT=mysql; else CLIENT=mariadb; fi
     if docker exec "$NAME" "$CLIENT" -uroot -prootpw -h127.0.0.1 -e 'SELECT 1' >/dev/null 2>&1; then
+        READY=1
         break
     fi
     sleep 1
 done
-docker exec "$NAME" "$CLIENT" -uroot -prootpw -h127.0.0.1 -e 'SELECT VERSION()' 2>/dev/null
+if [ -z "$READY" ]; then
+    echo "$IMAGE did not start within 120s" >&2
+    docker logs "$NAME" 2>&1 | tail -20 >&2 || true
+    exit 1
+fi
+docker exec "$NAME" "$CLIENT" -uroot -prootpw -h127.0.0.1 -e 'SELECT VERSION()'
 
 # a fresh server has an empty caching_sha2_password cache, so the first login takes the full
 # (RSA) path, which needs the server key over plain TCP

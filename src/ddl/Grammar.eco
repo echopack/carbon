@@ -1,9 +1,9 @@
 namespace carbon::ddl;
 
 /**
- * How one database spells schema changes. `carbon::ddl::Mysql` is MySQL's and MariaDB's. What a
- * grammar cannot express comes back as `.invalid` with the reason, never as a statement that
- * quietly does less.
+ * How one database spells schema changes. `carbon::ddl::Mysql` is MySQL's and MariaDB's,
+ * `carbon::ddl::Postgres` is PostgreSQL's. What a grammar cannot express comes back as
+ * `.invalid` with the reason, never as a statement that quietly does less.
  *
  * A class, so a `Migrator` can keep it.
  */
@@ -26,7 +26,8 @@ public interface Grammar
     /**
      * A statement whose one row holds 1 once this connection holds the lock named `$name`,
      * waiting up to `$seconds`. Empty when the database has no such lock; the `Migrator` then
-     * runs without one.
+     * runs without one. The `Migrator` asks with a second at a time and asks again, so no one
+     * statement waits long enough to run into the connection's timeout.
      */
     const function lock(const string& $name, uint32 $seconds) : string;
 
@@ -40,4 +41,14 @@ public interface Grammar
      * one, so a migration there cannot be rolled back as a whole.
      */
     const function transactional() : bool;
+
+    /**
+     * A statement that moves the counter of `$column`, a column that counts up, past the largest
+     * key in `$table`, for after rows were inserted with keys of their own. None when the
+     * database does that by itself, which is what a grammar that does not say gets.
+     */
+    const function advance(const string& $table, const string& $column) : array<string>
+    {
+        return array<string>();
+    }
 }

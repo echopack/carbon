@@ -226,7 +226,7 @@ public class Store<M, K, S>
         }
         int64? $version = $this->table->version($model);
         if ($version != null && !$s->connection->traits()->matched) {
-            return .error(.invalid('a model with a version needs a driver that counts matched rows: open it with carbon::mysql::Source or Driver::open'));
+            return .error(.invalid('a model with a version needs a driver that counts matched rows: on MySQL, open it with carbon::mysql::Source or Driver::open'));
         }
         return .ok();
     }
@@ -313,6 +313,8 @@ public class Store<M, K, S>
                 return .error(.missing);
             }
             int64 $key = guard $this->key($rows) else { return .error(.column('key', Problem::of($rows, 0))); }
+            // read to the end, so the hooks below find the connection free
+            guard $rows->drain() else ($e) { return .error($e); }
             $this->table->inserted($model, $key);
         } else {
             Written $w = guard $db->exec($q) else ($e) { return .error($e); }

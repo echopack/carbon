@@ -1,0 +1,417 @@
+use blog::{UserRepository, PostRepository, CommentRepository, User, Post, Comment, Status, PostQuery, CommentQuery};
+use carbon::{DB, Error, Migrator};
+use carbon::pgsql::Driver;
+use carbon::listen::Log;
+use std::time;
+use std::thread;
+
+/**
+ * A blog on the server in CARBON_PGSQL_URL, with fresh tables, a log and a clock that only
+ * moves when told.
+ */
+class Live
+{
+    public DB $db;
+    public UserRepository $users;
+    public PostRepository $posts;
+    public CommentRepository $comments;
+    public Log $log;
+    public calendar::ManualClock $clock;
+
+    public constructor()
+    {
+        Driver $driver = guard Driver::open(url()) else ($e) { die("connect: {$e}"); }
+        $this->log = Log();
+        $this->clock = calendar::ManualClock(time::timestamp::from_unix_secs(1700000000));
+        $this->db = DB($driver, clock: $this->clock);
+        Migrator $migrator = Migrator($this->db, blog::Carbon::migrations(), carbon::ddl::Postgres());
+        guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+        guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+        $this->db->listen($this->log);
+        guard $this->db->register<UserRepository>();
+        guard $this->db->register<PostRepository>();
+        guard $this->db->register<CommentRepository>();
+        guard blog::Carbon::check($this->db);
+        UserRepository $users = guard $this->db->session()->repo<UserRepository>();
+        $this->users = $users;
+        PostRepository $posts = guard $this->db->session()->repo<PostRepository>();
+        $this->posts = $posts;
+        CommentRepository $comments = guard $this->db->session()->repo<CommentRepository>();
+        $this->comments = $comments;
+    }
+
+    /**
+     * Statements run since the last call.
+     */
+    public function ran() : usize
+    {
+        usize $n = $this->log->count();
+        $this->log->clear();
+        return $n;
+    }
+}
+
+test live_blog_tour
+{
+    $live = Live();
+    $b = $live;
+
+    // create
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario', $admin: true));
+    User $boris = guard $b->users->create(User($email: 'boris@example.com', $name: 'Boris'));
+    assert($mario->id == 1 && $boris->id == 2);
+    array<Post> $mine = [];
+    array<string> $titles = ['Typed SQL', 'Weak links', 'Draft ideas'];
+    foreach ($titles as const &$t) {
+        $live->clock->advance(time::duration::secs(60));
+        Post $p = guard $b->posts->create(Post($authorId: $mario->id, $title: $t, $tags: ['echo', 'carbon']));
+        $mine[] = $p;
+    }
+    $live->clock->advance(time::duration::secs(60));
+    Post $theirs = guard $b->posts->create(Post($authorId: $boris->id, $title: 'Hello from Boris', $body: 'hi', $views: 70000));
+    guard $b->posts->publish($mine[0]);
+    guard $b->posts->publish($mine[1]);
+    guard $b->posts->publish($theirs);
+
+    // read back: enums, codecs, narrow ints, nullable text and datetimes survive the trip
+    Post $back = guard $b->posts->find()->one($theirs->id);
+    assert($back->status == Status::published);
+    assert($back->views == 70000);
+    assert(($back->body ?? '') == 'hi');
+    assert($back->tags->count() == 0);
+    Post $tagged = guard $b->posts->find()->one($mine[0]->id);
+    assert($tagged->tags->count() == 2 && $tagged->tags[1] == 'carbon');
+    hydrahon::DateTime $made = guard $tagged->createdAt;
+    assert($made->year == 2023 && $made->month == 11 && $made->day == 14 && $made->hour == 22 && $made->minute == 14);
+    User $admin = guard $b->users->find()->one($mario->id);
+    assert($admin->admin);
+
+    // a clean save runs nothing, a dirty one writes and reads back
+    $live->ran();
+    guard $tagged->save();
+    assert($live->ran() == 0);
+    $tagged->title = 'Typed SQL, typed models';
+    guard $tagged->save();
+    assert($live->ran() == 1);
+    Post $again = guard $tagged->fresh();
+    assert($again->title == 'Typed SQL, typed models');
+
+    // a JSON column: the server keeps the document in its own spelling, the model reads it back
+    $live->ran();
+    $tagged->meta['lang'] = 'de';
+    $tagged->meta['tags'] = json::arr();
+    $tagged->meta['tags'][] = 'echo';
+    guard $tagged->save();
+    assert($live->ran() == 1);
+    Post $meta = guard $tagged->fresh();
+    assert(($meta->meta['lang']->asStr() ?? '') == 'de');
+    assert(($meta->meta['tags'][0]->asStr() ?? '') == 'echo');
+    assert(!$meta->dirty());
+    assert($back->meta->count() == 0);
+
+    // custom finders
+    array<Post> $active = guard $b->posts->active();
+    assert($active->count() == 3);
+    assert($active[0]->title == 'Hello from Boris');
+    array<Post> $feed = guard $b->posts->feed($mario, 0);
+    assert($feed->count() == 2);
+    array<Post> $found = guard $b->posts->search('Weak');
+    assert($found->count() == 1 && $found[0]->id == $mine[1]->id);
+
+    // eager loading: one query per relation
+    Comment $c1 = guard $b->comments->leave($mine[0], 'first!');
+    guard $b->comments->leave($mine[0], 'second');
+    guard $b->comments->leave($theirs, 'nice');
+    $live->ran();
+    guard $b->posts->load()->withAuthor()->withComments()->into($active);
+    assert($live->ran() == 2);
+    User $author = guard $active[0]->author->get();
+    assert($author->name == 'Boris');
+    usize $comments = 0;
+    foreach ($active as const &$p) {
+        $comments = $comments + $p->comments->count();
+    }
+    assert($comments == 3);
+    array<User> $people = guard $b->users->find()->withPosts(function(PostQuery $q) : PostQuery {
+        return $q->withComments(function(CommentQuery $c) : CommentQuery {
+            return $c->withPost();
+        });
+    })->get();
+    assert($live->ran() == 4);
+    assert($people[0]->posts->count() == 3 && $people[1]->posts->count() == 1);
+    usize $nested = 0;
+    foreach ($people as const &$u) {
+        foreach ($u->posts->get() as const &$p) {
+            foreach ($p->comments->get() as const &$c) {
+                Post $owner = guard $c->post->get();
+                assert($owner->id == $p->id);
+                $nested = $nested + 1;
+            }
+        }
+    }
+    assert($nested == 3);
+
+    // soft delete, the trashed scopes and restore
+    guard $mine[1]->delete();
+    array<Post> $left = guard $b->posts->active();
+    assert($left->count() == 2);
+    uint64 $trashed = guard $b->posts->find()->scope(.trashed)->count();
+    assert($trashed == 1);
+    guard $b->posts->restore($mine[1]);
+    uint64 $all = guard $b->posts->count();
+    assert($all == 4);
+
+    // exists reads one row and leaves the connection usable
+    bool $any = guard $b->posts->find()->popular(1000)->exists();
+    assert($any);
+    uint64 $popular = guard $b->posts->find()->popular(1000)->count();
+    assert($popular == 1);
+
+    // a duplicate inside a transaction rolls the whole thing back
+    status<Error> $s = $b->db->session()->transaction(function[$b]() : status<Error> {
+        guard $b->users->create(User($email: 'carol@example.com', $name: 'Carol')) else ($e) { return .error($e); }
+        guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failed());
+    assert($s->failure()->duplicate());
+    uint64 $users = guard $b->users->count();
+    assert($users == 2);
+
+    // a dangling foreign key is a reference fault
+    result<Comment, Error> $orphan = $b->comments->create(Comment($postId: 999, $body: 'lost'));
+    assert($orphan->failed());
+    assert($orphan->failure()->fault() == carbon::Fault::reference);
+
+    // bulk writes
+    uint64 $archived = guard $b->posts->archive($boris);
+    assert($archived == 1);
+    guard $b->comments->purge($c1);
+    uint64 $left2 = guard $b->comments->count();
+    assert($left2 == 2);
+
+    // streaming
+    Seen $seen = Seen();
+    guard $b->posts->find()->each(function[$seen](Post $p) : status<Error> {
+        $seen->views = $seen->views + ($p->views as int64);
+        return .ok();
+    });
+    assert($seen->views == 70000);
+}
+
+class Seen
+{
+    public int64 $views = 0;
+}
+
+test live_writes_inside_each
+{
+    $live = Live();
+    $b = $live;
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario'));
+    guard $b->posts->create(Post($authorId: $mario->id, $title: 'One'));
+    guard $b->posts->create(Post($authorId: $mario->id, $title: 'Two'));
+    // the rows are still streaming while the visitor runs, so the connection takes no write
+    status<Error> $s = $b->posts->find()->each(function(Post $p) : status<Error> {
+        $p->title = "{$p->title}!";
+        return $p->save();
+    });
+    assert(str::from($s->failure()) == 'database error: a stream, COPY or pipeline is still open on this connection');
+    // a batch is read in full before the visitor runs: it writes freely
+    guard $b->posts->find()->each(batch: 10, function(array<Post> $batch) : status<Error> {
+        foreach ($batch as &$p) {
+            $p->title = "{$p->title}!";
+            guard $p->save() else ($e) { return .error($e); }
+        }
+        return .ok();
+    });
+    array<Post> $all = guard $b->posts->find()->order(asc: blog::PostTable::$id)->get();
+    assert($all[0]->title == 'One!' && $all[1]->title == 'Two!');
+    // and the connection is free again after a stream that stopped early
+    uint64 $n = guard $b->posts->count();
+    assert($n == 2);
+}
+
+test live_models_follow_the_database
+{
+    $live = Live();
+    $b = $live;
+    User $mario = guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario'));
+    Post $p = guard $b->posts->create(Post($authorId: $mario->id, $title: 'Mine'));
+
+    // someone else already wrote the same title: the row matches but nothing changes, and
+    // Postgres counts it all the same
+    guard $b->db->run("UPDATE posts SET title = 'Theirs' WHERE id = {$p->id}");
+    $p->title = 'Theirs';
+    guard $p->save() else ($e) { die("an unchanged row is not stale: {$e}"); }
+
+    // the row is gone underneath
+    guard $b->db->run("DELETE FROM posts WHERE id = {$p->id}");
+    $p->title = 'Lost';
+    status<Error> $lost = $p->save();
+    assert(str::from($lost->failure()) == 'the row is gone or changed since the model was loaded');
+
+    // a rolled back insert leaves the model new, and it inserts again later
+    User $carol = User($email: 'carol@example.com', $name: 'Carol');
+    $b->users->attach($carol);
+    status<Error> $s = $b->db->session()->transaction(function[$b, $carol]() : status<Error> {
+        guard $carol->save() else ($e) { return .error($e); }
+        guard $b->users->create(User($email: 'mario@example.com', $name: 'Mario again')) else ($e) { return .error($e); }
+        return .ok();
+    });
+    assert($s->failure()->duplicate());
+    assert(!$carol->persisted() && $carol->id == 0);
+    guard $carol->save();
+    assert($carol->persisted() && $carol->id > 0);
+    uint64 $users = guard $b->users->count();
+    assert($users == 2);
+}
+
+test live_sessions_take_connections_of_their_own
+{
+    carbon::pgsql::Source $source = guard carbon::pgsql::Source::parse(url()) else ($e) { die("connect: {$e}"); }
+    DB $db = DB($source);
+    Migrator $migrator = Migrator($db, blog::Carbon::migrations(), carbon::ddl::Postgres());
+    guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+    guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+    guard $db->register<UserRepository>();
+    guard $db->register<PostRepository>();
+    guard $db->register<CommentRepository>();
+    guard blog::Carbon::check($db);
+    carbon::Session $a = $db->scoped();
+    carbon::Session $b = $db->scoped();
+    UserRepository $ua = guard $a->repo<UserRepository>();
+    UserRepository $ub = guard $b->repo<UserRepository>();
+    status<Error> $s = $a->transaction(function[$ua, $ub]() : status<Error> {
+        guard $ua->create(User($email: 'a@example.com', $name: 'A')) else ($e) { return .error($e); }
+        // the other session is on a connection of its own: it neither sees the open transaction
+        // nor ends up in it
+        uint64 $seen = guard $ub->count() else ($e) { return .error($e); }
+        assert($seen == 0);
+        guard $ub->create(User($email: 'b@example.com', $name: 'B')) else ($e) { return .error($e); }
+        return .error(.invalid('roll back'));
+    });
+    assert($s->failed());
+    uint64 $left = guard $ua->count();
+    assert($left == 1);
+    User $kept = guard $ua->find()->one();
+    assert($kept->email == 'b@example.com');
+    // the root session, a and b each hold one
+    assert($source->pool->open() == 3);
+}
+
+/**
+ * A sealed blog on a pool of `$max` connections, with fresh tables.
+ */
+internal function pooled(usize $max) : DB
+{
+    pgsql::Options $o = guard pgsql::Options::parse(url()) else ($e) { die("url: {$e}"); }
+    carbon::pgsql::Source $source = carbon::pgsql::Source($o, pgsql::PoolOptions($max: $max));
+    DB $db = DB($source);
+    Migrator $migrator = Migrator($db, blog::Carbon::migrations(), carbon::ddl::Postgres());
+    guard $migrator->reset() else ($e) { die("reset: {$e}"); }
+    guard $migrator->up() else ($e) { die("migrate: {$e}"); }
+    guard $db->register<UserRepository>();
+    guard $db->register<PostRepository>();
+    guard $db->register<CommentRepository>();
+    guard blog::Carbon::check($db);
+    $db->seal();
+    return $db;
+}
+
+test live_a_sealed_db_shared_by_sixteen_threads
+{
+    DB $db = pooled(4);
+    array<thread::task<int64>> $workers = array<thread::task<int64>>();
+    foreach (0 .. 16 as $w) {
+        int64 $who = $w as int64;
+        thread::task<int64> $t = guard thread::spawn(function() : int64 {
+            int64 $made = 0;
+            foreach (0 .. 20 as $n) {
+                // a session per unit of work, so its connection goes back to the pool after it
+                carbon::Session $s = $db->scoped();
+                UserRepository $users = guard $s->repo<UserRepository>();
+                User $u = guard $users->create(User($email: "u{$who}-{$n}@example.com", $name: "U{$who}"));
+                User? $back = guard $users->get($u->id);
+                if ($back != null) {
+                    $made = $made + 1;
+                }
+            }
+            return $made;
+        }) else ($e) {
+            die($e->message());
+        }
+        $workers->push($t);
+    }
+    int64 $total = 0;
+    foreach ($workers as &$t) {
+        $total = $total + $t->wait();
+    }
+    assert($total == 320);
+    UserRepository $all = guard $db->scoped()->repo<UserRepository>();
+    uint64 $count = guard $all->count();
+    assert($count == 320);
+}
+
+test live_a_deadlock_between_two_threads_is_retryable
+{
+    DB $db = pooled(4);
+    UserRepository $setup = guard $db->scoped()->repo<UserRepository>();
+    User $a = guard $setup->create(User($email: 'a@example.com', $name: 'A'));
+    User $b = guard $setup->create(User($email: 'b@example.com', $name: 'B'));
+    int64 $ida = $a->id;
+    int64 $idb = $b->id;
+    // each locks one row, then wants the other's: Postgres picks one of the two as the victim
+    thread::task<bool> $one = guard thread::spawn(function() : bool {
+        carbon::Session $s = $db->scoped();
+        status<Error> $r = $s->transaction(function[$s, $ida, $idb]() : status<Error> {
+            guard $s->connection()->run("UPDATE users SET name = 'one' WHERE id = {$ida}") else ($e) { return .error($e); }
+            thread::sleep(300);
+            guard $s->connection()->run("UPDATE users SET name = 'one' WHERE id = {$idb}") else ($e) { return .error($e); }
+            return .ok();
+        });
+        return $r->failed() && $r->failure()->retryable();
+    }) else ($e) {
+        die($e->message());
+    }
+    thread::task<bool> $two = guard thread::spawn(function() : bool {
+        carbon::Session $s = $db->scoped();
+        status<Error> $r = $s->transaction(function[$s, $ida, $idb]() : status<Error> {
+            guard $s->connection()->run("UPDATE users SET name = 'two' WHERE id = {$idb}") else ($e) { return .error($e); }
+            thread::sleep(300);
+            guard $s->connection()->run("UPDATE users SET name = 'two' WHERE id = {$ida}") else ($e) { return .error($e); }
+            return .ok();
+        });
+        return $r->failed() && $r->failure()->retryable();
+    }) else ($e) {
+        die($e->message());
+    }
+    bool $first = $one->wait();
+    bool $second = $two->wait();
+    // exactly one of them was the victim
+    assert($first != $second);
+}
+
+test live_a_migrator_waits_for_the_advisory_lock_then_gives_up
+{
+    carbon::ddl::Postgres $grammar = carbon::ddl::Postgres();
+    // another copy of the app holds the lock for migrations
+    pgsql::Connection $other = server();
+    pgsql::ResultSet $took = guard $other->query($grammar->lock('carbon_migrations', 0)) else ($e) { die("lock: {$e}"); }
+    assert(($took[0][0]->int() ?? 0) == 1);
+
+    Driver $driver = guard Driver::open(url()) else ($e) { die("connect: {$e}"); }
+    DB $db = DB($driver);
+    Migrator $migrator = Migrator($db, blog::Carbon::migrations(), $grammar);
+    $migrator->wait = 1;
+    time::instant $from = time::instant::now();
+    result<array<string>, Error> $ran = $migrator->up();
+    assert(str::from($ran->failure()) == 'another migrator is running');
+    // it tried for the second it was given, not once and not forever
+    int64 $waited = $from->elapsed()->as_millis();
+    assert($waited >= 900 && $waited < 5000);
+
+    // once the lock is free the migrator gets it
+    guard $other->query($grammar->unlock('carbon_migrations'));
+    guard $migrator->status();
+}

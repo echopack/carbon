@@ -27,8 +27,9 @@ public enum Fault : uint8
     case constraint = 3;
 
     /**
-     * The server picked this transaction as a deadlock victim or a lock wait timed out. Running
-     * the work again can succeed.
+     * The server picked this transaction as a deadlock victim, a lock wait timed out, or a row
+     * changed after the transaction began reading (MariaDB's snapshot isolation). Running the
+     * work again can succeed.
      */
     case deadlock = 4;
 

@@ -25,6 +25,13 @@ public class Driver : carbon::Driver
     internal mysql::Lease? $lease = null;
 
     /**
+     * MariaDB's snapshot isolation: a row changed after this transaction began reading
+     * (ER_CHECKREAD). libmysql has no name for it, so it is an `.other` that still carries its
+     * number.
+     */
+    const uint16 RECORD_CHANGED = 1020;
+
+    /**
      * Whether the connection counts the rows an UPDATE matched (`foundRows`), so carbon can tell
      * a write that found no row from one that changed nothing. `open` turns it on; a connection
      * opened elsewhere is not trusted with it.
@@ -148,6 +155,21 @@ public class Driver : carbon::Driver
     }
 
     /**
+     * Close a borrowed connection, so the pool drops it when it comes back. One the driver owns
+     * stays open: nothing would open it again.
+     */
+    public function discard() : void
+    {
+        // bound first: a value compared with null where it is made is never let go of
+        mysql::Lease? $held = $this->lease;
+        if ($held == null) {
+            return;
+        }
+        $this->open = null;
+        $this->connection->close();
+    }
+
+    /**
      * A libmysql error in carbon's terms.
      */
     public static function failure(const mysql::Error& $e) : Error
@@ -155,11 +177,18 @@ public class Driver : carbon::Driver
         Fault $fault = .other;
         string? $state = $e->state();
         mysql::ErrorCode? $code = $e->code();
+        int64? $number = null;
+        bool $changed = false;
+        if ($code != null) {
+            mysql::ErrorCode $c = guard $code;
+            $number = $c->value() as int64;
+            $changed = $c->value() == self::RECORD_CHANGED;
+        }
         if ($e->is(.dupEntry)) {
             $fault = .duplicate;
         } else if ($e->is(.rowIsReferenced) || $e->is(.noReferencedRow)) {
             $fault = .reference;
-        } else if ($e->retryable()) {
+        } else if ($e->retryable() || $changed) {
             $fault = .deadlock;
         } else if ($state != null) {
             string $s = guard $state;
@@ -183,11 +212,6 @@ public class Driver : carbon::Driver
             else => {
             },
         };
-        int64? $number = null;
-        if ($code != null) {
-            mysql::ErrorCode $c = guard $code;
-            $number = $c->value() as int64;
-        }
         return .driver(Failure($fault, $e->message(), $state, $number));
     }
 }

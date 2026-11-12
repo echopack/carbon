@@ -37,6 +37,11 @@ public class Driver<D : hydrahon::Dialect> : carbon::Driver
      */
     public bool $matched = true;
 
+    /**
+     * How many times carbon gave up on the connection with `discard()`.
+     */
+    public usize $discarded = 0;
+
     public constructor()
     {
         $this->dialect = D();
@@ -73,6 +78,11 @@ public class Driver<D : hydrahon::Dialect> : carbon::Driver
     {
         $this->answers[] = Answer::fails($error);
         return $this;
+    }
+
+    public function discard() : void
+    {
+        $this->discarded++;
     }
 
     /**

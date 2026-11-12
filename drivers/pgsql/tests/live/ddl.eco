@@ -1,0 +1,215 @@
+use blog::{User, UserRepository};
+use carbon::{Session, Event};
+use carbon::ddl::{Table, Alter, Column, Postgres};
+use hydrahon::{Value, Time, Bytes};
+use std::env;
+
+/**
+ * The server in CARBON_PGSQL_URL, which scripts/test-live.sh sets.
+ */
+function url() : string
+{
+    string $url = string::from(env::var('CARBON_PGSQL_URL') ?? '');
+    assert(!$url->empty());
+    return $url;
+}
+
+/**
+ * A connection of its own to the server in CARBON_PGSQL_URL, for running what the grammar wrote.
+ */
+function server() : pgsql::Connection
+{
+    pgsql::Connection $c = guard pgsql::Connection::open(url()) else ($e) { die("connect: {$e}"); }
+    return $c;
+}
+
+function apply(pgsql::Connection $c, const array<string>& $sql) : status<pgsql::Error>
+{
+    foreach ($sql as const &$s) {
+        guard $c->exec($s) else ($e) { return .error($e); }
+    }
+    return .ok();
+}
+
+function fresh(pgsql::Connection $c, const Table& $t) : void
+{
+    Postgres $g = Postgres();
+    guard $c->exec($g->drop($t->name, $exists: true));
+    array<string> $sql = guard $g->create($t) else ($e) { die("create: {$e}"); }
+    guard apply($c, $sql) else ($e) { die("create: {$e}"); }
+}
+
+function altering(pgsql::Connection $c, const Alter& $a) : status<pgsql::Error>
+{
+    array<string> $sql = guard Postgres()->alter($a) else ($e) { die("alter: {$e}"); }
+    return apply($c, $sql);
+}
+
+function one(pgsql::Connection $c, const string& $sql) : pgsql::Value
+{
+    pgsql::ResultSet $rs = guard $c->query($sql) else ($e) { die("{$sql}: {$e}"); }
+    return $rs[0][0];
+}
+
+function number(pgsql::Connection $c, const string& $sql) : int64
+{
+    return one($c, $sql)->int() ?? -1;
+}
+
+function word(pgsql::Connection $c, const string& $sql) : string
+{
+    return one($c, $sql)->text() ?? '';
+}
+
+test live_an_identity_is_advanced_past_seeded_keys
+{
+    pgsql::Connection $c = server();
+    Column $id = Column('id', .int);
+    $id->increments = true;
+    $id->primary = true;
+    fresh($c, Table('live_seeded')->add($id)->string('name', 32));
+    guard $c->exec("INSERT INTO live_seeded (id, name) VALUES (1, 'a'), (2, 'b')");
+    guard apply($c, Postgres()->advance('live_seeded', 'id'));
+    guard $c->exec("INSERT INTO live_seeded (name) VALUES ('c')");
+    assert(number($c, "SELECT id FROM live_seeded WHERE name = 'c'") == 3);
+
+    // an empty table starts over at 1
+    guard $c->exec('DELETE FROM live_seeded');
+    guard apply($c, Postgres()->advance('live_seeded', 'id'));
+    guard $c->exec("INSERT INTO live_seeded (name) VALUES ('d')");
+    assert(number($c, "SELECT id FROM live_seeded WHERE name = 'd'") == 1);
+}
+
+test live_an_identity_key_is_widened
+{
+    pgsql::Connection $c = server();
+    Column $id = Column('id', .int);
+    $id->increments = true;
+    $id->primary = true;
+    fresh($c, Table('live_widened')->add($id)->string('name', 32));
+    guard $c->exec("INSERT INTO live_widened (name) VALUES ('a'), ('b')");
+
+    Column $wide = Column('id', .bigint);
+    $wide->increments = true;
+    guard altering($c, Alter('live_widened')->modify($wide)) else ($e) { die("widen: {$e}"); }
+    assert(word($c, "SELECT data_type FROM information_schema.columns WHERE table_name = 'live_widened' AND column_name = 'id'") == 'bigint');
+    assert(word($c, "SELECT is_identity FROM information_schema.columns WHERE table_name = 'live_widened' AND column_name = 'id'") == 'YES');
+    assert(word($c, "SELECT seqtypid::regtype::text FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('live_widened', 'id')::regclass") == 'bigint');
+    // the new identity counts on from the rows already there
+    guard $c->exec("INSERT INTO live_widened (name) VALUES ('c')");
+    assert(number($c, "SELECT id FROM live_widened WHERE name = 'c'") == 3);
+
+    // modified without counting up, it is a plain column
+    guard altering($c, Alter('live_widened')->modify(Column('id', .bigint))) else ($e) { die("plain: {$e}"); }
+    assert(word($c, "SELECT is_identity FROM information_schema.columns WHERE table_name = 'live_widened' AND column_name = 'id'") == 'NO');
+}
+
+test live_a_shorter_string_is_refused_not_cut
+{
+    pgsql::Connection $c = server();
+    fresh($c, Table('live_shrunk')->string('email', 255));
+    guard $c->exec("INSERT INTO live_shrunk (email) VALUES ('someone.with.a.long.name@example.com')");
+    status<pgsql::Error> $done = altering($c, Alter('live_shrunk')->modify(Column('email', .string(8))));
+    assert($done->failed());
+    assert(word($c, 'SELECT email FROM live_shrunk') == 'someone.with.a.long.name@example.com');
+}
+
+test live_a_default_of_the_old_type_does_not_stop_a_new_type
+{
+    pgsql::Connection $c = server();
+    fresh($c, Table('live_retyped')->string('status', 8, $default: 'draft'));
+    guard altering($c, Alter('live_retyped')->modify(Column('status', .int, false, Value::from(0 as int64)))) else ($e) { die("retype: {$e}"); }
+    guard $c->exec('INSERT INTO live_retyped DEFAULT VALUES');
+    assert(number($c, 'SELECT status FROM live_retyped') == 0);
+}
+
+test live_a_time_holds_a_duration
+{
+    pgsql::Connection $c = server();
+    Column $d = Column('d', .time, false, Value::from(Time(true, 1, 0, 0, 0)));
+    fresh($c, Table('live_durations')->add($d)->string('k', 8));
+    guard $c->exec("INSERT INTO live_durations (k) VALUES ('default')");
+    guard $c->exec('INSERT INTO live_durations (d, k) VALUES ($1, $2)', carbon::pgsql::Params::of(hydrahon::Params::from([Value::from(Time(false, 30, 0, 0, 0)), Value::from('long')])));
+    guard $c->exec('INSERT INTO live_durations (d, k) VALUES ($1, $2)', carbon::pgsql::Params::of(hydrahon::Params::from([Value::from(Time(false, 9, 30, 0, 0)), Value::from('clock')])));
+    assert(word($c, "SELECT d::text FROM live_durations WHERE k = 'default'") == '-01:00:00');
+    assert(word($c, "SELECT d::text FROM live_durations WHERE k = 'long'") == '30:00:00');
+    assert(word($c, "SELECT d::text FROM live_durations WHERE k = 'clock'") == '09:30:00');
+}
+
+test live_an_advance_without_an_identity_is_refused
+{
+    pgsql::Connection $c = server();
+    fresh($c, Table('live_unseeded')->int('id')->string('name', 32));
+    status<pgsql::Error> $done = apply($c, Postgres()->advance('live_unseeded', 'id'));
+    assert($done->failed());
+    assert(str::from($done->failure())->contains('column live_unseeded.id has no identity to advance'));
+}
+
+test live_a_whole_number_becomes_a_boolean_and_back
+{
+    pgsql::Connection $c = server();
+    fresh($c, Table('live_flags')->tinyint('flag', $nullable: true)->string('k', 8));
+    guard $c->exec("INSERT INTO live_flags (flag, k) VALUES (0, 'zero'), (1, 'one'), (2, 'two'), (NULL, 'none')");
+    guard altering($c, Alter('live_flags')->modify(Column('flag', .bool, true))) else ($e) { die("to bool: {$e}"); }
+    assert(word($c, "SELECT flag::text FROM live_flags WHERE k = 'zero'") == 'false');
+    assert(word($c, "SELECT flag::text FROM live_flags WHERE k = 'one'") == 'true');
+    assert(word($c, "SELECT flag::text FROM live_flags WHERE k = 'two'") == 'true');
+    assert(number($c, "SELECT count(*) FROM live_flags WHERE flag IS NULL") == 1);
+
+    guard altering($c, Alter('live_flags')->modify(Column('flag', .tinyint, true))) else ($e) { die("to tinyint: {$e}"); }
+    assert(number($c, "SELECT flag FROM live_flags WHERE k = 'zero'") == 0);
+    assert(number($c, "SELECT flag FROM live_flags WHERE k = 'two'") == 1);
+
+    // and an INTEGER widens to a BIGINT keeping its values
+    guard altering($c, Alter('live_flags')->modify(Column('flag', .bigint, true))) else ($e) { die("to bigint: {$e}"); }
+    assert(number($c, "SELECT flag FROM live_flags WHERE k = 'one'") == 1);
+}
+
+test live_a_default_with_a_backslash_is_kept_whatever_the_server_reads
+{
+    pgsql::Connection $c = server();
+    guard $c->exec('SET standard_conforming_strings = off');
+    guard $c->exec('SET escape_string_warning = off');
+    fresh($c, Table('live_paths')->string('path', 32, $default: 'C:\\dir\\')->add(Column('raw', .bytes, false, Value::from(Bytes("\x5C\x00"))))->string('k', 8));
+    guard $c->exec("INSERT INTO live_paths (k) VALUES ('x')");
+    guard $c->exec('SET standard_conforming_strings = on');
+    assert(word($c, "SELECT path FROM live_paths") == 'C:\\dir\\');
+    assert(word($c, "SELECT encode(raw, 'hex') FROM live_paths") == '5c00');
+}
+
+/**
+ * Runs a statement on the session's connection once a user is created, as an audit trail would.
+ */
+class Audit : carbon::Observer<User>
+{
+    public array<string> $failures = [];
+    public usize $heard = 0;
+
+    public function before(Session $session, Event $event, User& $model) : status<carbon::Error>
+    {
+        return .ok();
+    }
+
+    public function after(Session $session, Event $event, const User& $model) : void
+    {
+        if ($event != Event::creating) {
+            return;
+        }
+        $this->heard++;
+        result<carbon::Written, carbon::Error> $ran = $session->connection()->run('SELECT 1');
+        if ($ran->failed()) {
+            $this->failures[] = str::from($ran->failure());
+        }
+    }
+}
+
+test live_a_hook_after_a_create_finds_the_connection_free
+{
+    $live = Live();
+    Audit $audit = Audit();
+    $live->db->observe<User>($audit);
+    UserRepository $users = guard $live->db->session()->repo<UserRepository>();
+    guard $users->create(User($email: 'audit@example.com', $name: 'Audit'));
+    assert($audit->heard == 1);
+    assert($audit->failures->count() == 0);
+}

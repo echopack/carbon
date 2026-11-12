@@ -10,7 +10,9 @@ public enum Change
     case rename(string $from, string $to);
 
     /**
-     * Give an existing column a new definition, kept under its name.
+     * Give an existing column a new definition, kept under its name. The definition is the
+     * whole of it: what `$column` does not say, the column no longer has, so a key that should
+     * go on counting up is modified with `increments` set.
      */
     case modify(Column $column);
     case index(Index $index);

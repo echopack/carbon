@@ -1,0 +1,237 @@
+namespace carbon::ddl;
+
+use hydrahon::Value;
+
+/**
+ * Which database a literal is written for, where they differ: a boolean, backslashes in a
+ * string, and bytes.
+ */
+internal enum Spelling
+{
+    case mysql;
+    case postgres;
+}
+
+/**
+ * What every grammar writes the same way: quoted identifiers, foreign keys, and the literals of
+ * defaults, with `Spelling` for the few places where the databases differ.
+ */
+internal struct Literal
+{
+    /**
+     * `$v` as an SQL literal, for a default: DDL takes no bound parameters.
+     */
+    internal static function value(const Value& $v, Spelling $s) : string
+    {
+        return match ($v) {
+            Value::none => 'NULL',
+            Value::bool($b) => Literal::flag($b, $s),
+            Value::int($n) => "{$n}",
+            Value::uint($n) => "{$n}",
+            Value::float($n) => "{$n}",
+            Value::decimal($d) => $d->text,
+            Value::text($str) => Literal::text($str, $s),
+            Value::bytes($b) => Literal::bytes($b->data, $s),
+            Value::date($d) => Literal::quoted(Literal::date($d->year, $d->month, $d->day)),
+            Value::datetime($t) => Literal::quoted(Literal::stamp($t)),
+            Value::time($t) => Literal::time($t),
+        };
+    }
+
+    private static function flag(bool $b, Spelling $s) : string
+    {
+        if ($b) {
+            return match ($s) {
+                Spelling::mysql => '1',
+                Spelling::postgres => 'TRUE',
+            };
+        }
+        return match ($s) {
+            Spelling::mysql => '0',
+            Spelling::postgres => 'FALSE',
+        };
+    }
+
+    private static function bytes(const string& $data, Spelling $s) : string
+    {
+        string $digits = Literal::hex($data);
+        return match ($s) {
+            Spelling::mysql => "X'{$digits}'",
+            Spelling::postgres => "E'\\\\x{$digits}'::bytea",
+        };
+    }
+
+    /**
+     * `CREATE TABLE [IF NOT EXISTS] name (parts)`.
+     */
+    internal static function table<D : hydrahon::Dialect>(const D& $dialect, const Table& $table, const array<string>& $parts) : string
+    {
+        string $out = 'CREATE TABLE ';
+        if ($table->missing) {
+            $out->append('IF NOT EXISTS ');
+        }
+        $out->append(Literal::name($dialect, $table->name));
+        $out->append(' (');
+        $out->append(str::join($parts, ', '));
+        $out->append(')');
+        return $out;
+    }
+
+    internal static function drop<D : hydrahon::Dialect>(const D& $dialect, const string& $table, bool $exists) : string
+    {
+        string $name = Literal::name($dialect, $table);
+        if ($exists) {
+            return "DROP TABLE IF EXISTS {$name}";
+        }
+        return "DROP TABLE {$name}";
+    }
+
+    internal static function name<D : hydrahon::Dialect>(const D& $dialect, const string& $ident) : string
+    {
+        str::text $t = str::text();
+        $dialect->quote($ident, $t);
+        return $t->take();
+    }
+
+    internal static function list<D : hydrahon::Dialect>(const D& $dialect, const array<string>& $names) : string
+    {
+        array<string> $quoted = [];
+        foreach ($names as const &$n) {
+            $quoted[] = Literal::name($dialect, $n);
+        }
+        return str::join($quoted, ', ');
+    }
+
+    internal static function foreign<D : hydrahon::Dialect>(const D& $dialect, const string& $table, const Foreign& $f) : string
+    {
+        string $name = Literal::name($dialect, $f->named($table));
+        string $column = Literal::name($dialect, $f->column);
+        string $other = Literal::name($dialect, $f->table);
+        string $references = Literal::name($dialect, $f->references);
+        string $onDelete = Literal::action($f->onDelete);
+        string $onUpdate = Literal::action($f->onUpdate);
+        string $out = "CONSTRAINT {$name} FOREIGN KEY ({$column}) ";
+        $out->append("REFERENCES {$other} ({$references}) ");
+        $out->append("ON DELETE {$onDelete} ON UPDATE {$onUpdate}");
+        return $out;
+    }
+
+    /**
+     * `$s` between single quotes, with quotes and backslashes doubled. MySQL's default SQL mode
+     * reads a backslash as an escape. Postgres does too in an escape string (`E'...'`), which a
+     * string with a backslash becomes there, and reads it the same with
+     * `standard_conforming_strings` on or off.
+     */
+    internal static function text(const string& $s, Spelling $spelling) : string
+    {
+        bool $escaped = false;
+        string $out = "'";
+        usize $i = 0;
+        while ($i < $s->size()) {
+            uint8 $b = $s->byte($i);
+            if ($b == 39) {
+                $out->append("''");
+            } else if ($b == 92) {
+                $out->append('\\\\');
+                $escaped = true;
+            } else {
+                $out->push($b);
+            }
+            $i = $i + 1;
+        }
+        $out->append("'");
+        if ($escaped && $spelling == Spelling::postgres) {
+            return "E{$out}";
+        }
+        return $out;
+    }
+
+    /**
+     * `$s` between single quotes, for what has no quote to escape: a date, a stamp.
+     */
+    private static function quoted(const string& $s) : string
+    {
+        return "'{$s}'";
+    }
+
+    /**
+     * A TIME between single quotes, with its sign; the hours may go past a day.
+     */
+    private static function time(const hydrahon::Time& $t) : string
+    {
+        string $clock = Literal::clock($t->hours, $t->minute, $t->second, $t->micro);
+        if ($t->negative) {
+            return Literal::quoted("-{$clock}");
+        }
+        return Literal::quoted($clock);
+    }
+
+    private static function action(Action $a) : string
+    {
+        return match ($a) {
+            Action::restrict => 'RESTRICT',
+            Action::cascade => 'CASCADE',
+            Action::setNull => 'SET NULL',
+            Action::noAction => 'NO ACTION',
+        };
+    }
+
+    /**
+     * `YYYY-MM-DD`.
+     */
+    private static function date(uint16 $year, uint8 $month, uint8 $day) : string
+    {
+        string $y = Literal::pad($year as uint32, 4);
+        string $m = Literal::pad($month as uint32, 2);
+        string $d = Literal::pad($day as uint32, 2);
+        return "{$y}-{$m}-{$d}";
+    }
+
+    /**
+     * `HH:MM:SS`, with the microseconds after a dot when there are any.
+     */
+    private static function clock(uint32 $hours, uint8 $minute, uint8 $second, uint32 $micro) : string
+    {
+        string $h = Literal::pad($hours, 2);
+        string $m = Literal::pad($minute as uint32, 2);
+        string $s = Literal::pad($second as uint32, 2);
+        string $out = "{$h}:{$m}:{$s}";
+        if ($micro > 0) {
+            string $us = Literal::pad($micro, 6);
+            $out->append(".{$us}");
+        }
+        return $out;
+    }
+
+    /**
+     * `YYYY-MM-DD HH:MM:SS`, unquoted.
+     */
+    private static function stamp(const hydrahon::DateTime& $t) : string
+    {
+        string $day = Literal::date($t->year, $t->month, $t->day);
+        string $clock = Literal::clock($t->hour as uint32, $t->minute, $t->second, $t->micro);
+        return "{$day} {$clock}";
+    }
+
+    /**
+     * `$data` as upper case hex digits, two per byte.
+     */
+    private static function hex(const string& $data) : string
+    {
+        string $digits = '0123456789ABCDEF';
+        string $out = '';
+        usize $i = 0;
+        while ($i < $data->size()) {
+            uint8 $b = $data->byte($i);
+            $out->push($digits->byte(($b >> 4) as usize));
+            $out->push($digits->byte(($b & 15) as usize));
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    private static function pad(uint32 $n, usize $width) : string
+    {
+        return str::lpad("{$n}", $width, 48);
+    }
+}

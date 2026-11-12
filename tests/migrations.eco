@@ -69,7 +69,7 @@ const string LEDGER = 'CREATE TABLE IF NOT EXISTS `carbon_migrations` (`id` VARC
 const string READ = 'SELECT `carbon_migrations`.`id`, `carbon_migrations`.`batch`, `carbon_migrations`.`ran_at` FROM `carbon_migrations` ORDER BY `carbon_migrations`.`id` ASC';
 const string INSERT = 'INSERT INTO `carbon_migrations` (`id`, `batch`, `ran_at`) VALUES (?, ?, ?)';
 const string DELETE = 'DELETE FROM `carbon_migrations` WHERE `carbon_migrations`.`id` = ?';
-const string LOCK = "SELECT GET_LOCK('carbon_migrations', 10)";
+const string LOCK = "SELECT GET_LOCK('carbon_migrations', 1)";
 const string UNLOCK = "SELECT RELEASE_LOCK('carbon_migrations')";
 
 function ran(const string& $id, int64 $batch) : array<Value>
@@ -234,17 +234,74 @@ test a_failed_migration_is_named_and_not_recorded
 test another_migrator_holding_the_lock_stops_this_one
 {
     $fake = fake::Driver<hydrahon::Mysql>();
-    $fake->rows([[Value::from(0 as int64)]]);
+    // asked a second at a time, so no one statement outlasts the connection's timeout
+    $fake->rows([[Value::from(0 as int64)]])->rows([[Value::from(0 as int64)]]);
     Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    $m->wait = 2;
     result<array<string>, Error> $r = $m->up();
     assert(str::from($r->failure()) == 'another migrator is running');
-    assert($fake->count() == 1);
+    assert($fake->count() == 2);
+    assert($fake->texts()[0] == LOCK);
+    assert($fake->last() == LOCK);
+    assert($fake->discarded == 0);
 
     // GET_LOCK answers NULL on an error
     $fake->rows([[Value::none]]);
-    $m->wait = 3;
+    $m->wait = 0;
     assert($m->up()->failed());
-    assert($fake->last() == "SELECT GET_LOCK('carbon_migrations', 3)");
+    assert($fake->last() == "SELECT GET_LOCK('carbon_migrations', 0)");
+
+}
+
+test the_lock_is_taken_on_a_later_try
+{
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->rows([[Value::from(0 as int64)]])->rows(locked())->written(0)->rows([])->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    Report $r = guard $m->status();
+    assert($r->pending->count() == 2);
+    array<string> $sent = $fake->texts();
+    assert($sent[0] == LOCK && $sent[1] == LOCK);
+    assert($fake->last() == UNLOCK);
+}
+
+test a_lock_that_could_not_be_let_go_of_discards_the_connection
+{
+    // a pooled connection still holding the lock would keep every later migrator out
+    $a = fake::Driver<hydrahon::Mysql>();
+    $a->rows(locked())->written(0)->rows([])->fails(fixtures::failure(.connection));
+    $b = fake::Driver<hydrahon::Mysql>();
+    $b->rows(locked())->written(0)->rows([])->rows(locked());
+    $source = fake::Source<hydrahon::Mysql>([$a, $b]);
+    Migrator $m = Migrator(DB($source), steps(), Mysql());
+    assert($m->status()->failed());
+    assert($a->last() == UNLOCK);
+    assert($a->discarded == 1);
+    // the next statement runs on another connection
+    assert(!$m->status()->failed());
+    assert($source->opened() == 2);
+    assert($b->discarded == 0);
+}
+
+test a_lock_that_failed_to_answer_discards_the_connection
+{
+    // the server may have granted it after the client gave up waiting
+    $a = fake::Driver<hydrahon::Mysql>();
+    $a->fails(fixtures::failure(.connection));
+    Migrator $m = Migrator(DB(fake::Source<hydrahon::Mysql>([$a])), steps(), Mysql());
+    assert($m->up()->failed());
+    assert($a->discarded == 1);
+}
+
+test a_lone_connection_is_not_discarded
+{
+    // a DB on one driver has nothing to open in its place
+    $fake = fake::Driver<hydrahon::Mysql>();
+    $fake->fails(fixtures::failure(.connection))->rows(locked())->written(0)->rows([])->rows(locked());
+    Migrator $m = Migrator(DB($fake), steps(), Mysql());
+    assert($m->up()->failed());
+    assert($fake->discarded == 0);
+    assert(!$m->status()->failed());
 }
 
 test two_migrations_with_one_id_are_refused

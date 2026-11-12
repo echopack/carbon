@@ -222,6 +222,18 @@ public class Connection
         return .ok($d);
     }
 
+    /**
+     * Let go of the connection so no one uses it again (see `Driver::discard`), outside a
+     * transaction. The next statement opens another.
+     */
+    internal function discard() : void
+    {
+        Driver? $held = $this->driver;
+        $this->driver = null;
+        Driver $d = guard $held else { return; }
+        $d->discard();
+    }
+
     internal function begin() : status<Error>
     {
         if ($this->open) {

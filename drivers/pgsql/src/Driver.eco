@@ -1,0 +1,214 @@
+namespace carbon::pgsql;
+
+/**
+ * carbon on PostgreSQL, over one libpgsql connection: a script's, or one a session borrowed from
+ * a `Source`.
+ *
+ * ```echo
+ * carbon::pgsql::Driver $driver = guard carbon::pgsql::Driver::open('postgres://app:secret@127.0.0.1/blog');
+ * carbon::DB $db = carbon::DB($driver);
+ * guard $db->register<PostRepository>();
+ * ```
+ *
+ * A `DB` on one driver has one connection for every session; an app that serves requests gives
+ * it a `Source` instead.
+ *
+ * A query is prepared and kept on the connection, so the next run of the same SQL is one round
+ * trip with rows in binary. A statement run for what it did, without parameters (`BEGIN`, a
+ * migration's raw SQL), goes over the simple protocol and is not kept.
+ */
+public class Driver : carbon::Driver
+{
+    public pgsql::Connection $connection;
+    internal hydrahon::Postgres $dialect = hydrahon::Postgres();
+    internal pgsql::Transaction? $open = null;
+
+    /**
+     * The pool's lease when the connection is borrowed: dropping the driver gives it back.
+     */
+    internal pgsql::Lease? $lease = null;
+
+    public constructor(pgsql::Connection $connection)
+    {
+        $this->connection = $connection;
+    }
+
+    /**
+     * On a connection borrowed from a `Source`'s pool.
+     */
+    internal constructor(lease: pgsql::Lease $lease)
+    {
+        $this->connection = $lease->db();
+        $this->lease = $lease;
+    }
+
+    destructor()
+    {
+        // roll back while the connection is still this driver's, before the lease goes back
+        $this->open = null;
+    }
+
+    /**
+     * Connect to `postgres://user:password@host:port/database`.
+     */
+    public static function open(const string& $url) : result<Driver, Error>
+    {
+        pgsql::Options $o = guard pgsql::Options::parse($url) else ($e) { return .error(Driver::failure($e)); }
+        return Driver::open($o);
+    }
+
+    public static function open(const pgsql::Options& $options) : result<Driver, Error>
+    {
+        pgsql::Connection $c = guard pgsql::Connection::open($options) else ($e) { return .error(Driver::failure($e)); }
+        return .ok(Driver($c));
+    }
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public function query(const Statement& $s) : result<carbon::Cursor, Error>
+    {
+        pgsql::Rows $rows = guard $this->stream($s) else ($e) { return .error(Driver::failure($e)); }
+        carbon::Cursor $c = Cursor($rows);
+        return .ok($c);
+    }
+
+    /**
+     * What the statement did. Postgres has no last insert id: carbon asks for the key with
+     * RETURNING instead.
+     */
+    public function exec(const Statement& $s) : result<Written, Error>
+    {
+        pgsql::Outcome $o = guard $this->run($s) else ($e) { return .error(Driver::failure($e)); }
+        return .ok(Written($o->affectedRows, 0));
+    }
+
+    /**
+     * Keys come back through RETURNING, and an UPDATE counts the rows it matched.
+     */
+    public const function traits() : Traits
+    {
+        return Traits(true, true);
+    }
+
+    public function begin() : status<Error>
+    {
+        if ($this->open != null) {
+            return .error(.nested);
+        }
+        pgsql::Transaction $t = guard $this->connection->begin() else ($e) { return .error(Driver::failure($e)); }
+        $this->open = $t;
+        return .ok();
+    }
+
+    /**
+     * Make the transaction stick. A transaction a statement failed in is rolled back by the
+     * server instead, and that comes back as an error.
+     */
+    public function commit() : status<Error>
+    {
+        pgsql::Transaction $t = guard $this->open else { return .error(.invalid('no transaction is open')); }
+        $this->open = null;
+        guard $t->commit() else ($e) { return .error(Driver::failure($e)); }
+        return .ok();
+    }
+
+    public function rollback() : status<Error>
+    {
+        pgsql::Transaction $t = guard $this->open else { return .error(.invalid('no transaction is open')); }
+        $this->open = null;
+        guard $t->rollback() else ($e) { return .error(Driver::failure($e)); }
+        return .ok();
+    }
+
+    /**
+     * Close a borrowed connection, so the pool drops it when it comes back. One the driver owns
+     * stays open: nothing would open it again.
+     */
+    public function discard() : void
+    {
+        // bound first: a value compared with null where it is made is never let go of
+        pgsql::Lease? $held = $this->lease;
+        if ($held == null) {
+            return;
+        }
+        $this->open = null;
+        $this->connection->close();
+    }
+
+    /**
+     * A libpgsql error in carbon's terms, sorted by its SQLSTATE. Postgres has no error number
+     * of its own, so the failure carries the state alone.
+     */
+    public static function failure(const pgsql::Error& $e) : Error
+    {
+        return .driver(Failure(Driver::fault($e), $e->message(), $e->state(), null));
+    }
+
+    private function stream(const Statement& $s) : result<pgsql::Rows, pgsql::Error>
+    {
+        return $this->connection->stream($s->text, Params::of($s->params));
+    }
+
+    private function run(const Statement& $s) : result<pgsql::Outcome, pgsql::Error>
+    {
+        if ($s->params->count() == 0) {
+            return $this->connection->exec($s->text);
+        }
+        return $this->connection->exec($s->text, Params::of($s->params));
+    }
+
+    private static function fault(const pgsql::Error& $e) : Fault
+    {
+        match ($e) {
+            pgsql::Error::transport($t) => {
+                return .connection;
+            },
+            pgsql::Error::closed => {
+                return .connection;
+            },
+            pgsql::Error::timeout => {
+                return .connection;
+            },
+            pgsql::Error::exhausted => {
+                return .exhausted;
+            },
+            else => {
+            },
+        };
+        if ($e->is(.uniqueViolation)) {
+            return .duplicate;
+        }
+        if ($e->is(.foreignKeyViolation) || $e->is(.restrictViolation)) {
+            return .reference;
+        }
+        if ($e->retryable() || $e->is(.lockNotAvailable)) {
+            return .deadlock;
+        }
+        string $s = guard $e->state() else { return .other; }
+        if ($s->starts('23')) {
+            return .constraint;
+        }
+        if ($s->starts('08') || $e->is(.adminShutdown) || $e->is(.crashShutdown) || $e->is(.cannotConnectNow)) {
+            return .connection;
+        }
+        return .other;
+    }
+}

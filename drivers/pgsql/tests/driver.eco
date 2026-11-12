@@ -1,0 +1,103 @@
+use carbon::{Fault, Error};
+
+function server(const string& $state) : pgsql::Error
+{
+    return .server(pgsql::ServerError(pgsql::ErrorCode::from(pgsql::sqlstate($state)), 'ERROR', $state, 'refused'));
+}
+
+function fault(const Error& $e) : Fault
+{
+    return $e->fault();
+}
+
+function pgFault(const string& $state) : Fault
+{
+    return fault(carbon::pgsql::Driver::failure(server($state)));
+}
+
+test errors_map_onto_faults
+{
+    assert(pgFault('23505') == Fault::duplicate);
+    assert(pgFault('23503') == Fault::reference);
+    assert(pgFault('23001') == Fault::reference);
+    assert(pgFault('23502') == Fault::constraint);
+    assert(pgFault('23514') == Fault::constraint);
+    assert(pgFault('40001') == Fault::deadlock);
+    assert(pgFault('40P01') == Fault::deadlock);
+    assert(pgFault('55P03') == Fault::deadlock);
+    assert(pgFault('08006') == Fault::connection);
+    assert(pgFault('57P01') == Fault::connection);
+    assert(pgFault('42601') == Fault::other);
+    pgsql::Error $closed = .closed;
+    assert(fault(carbon::pgsql::Driver::failure($closed)) == Fault::connection);
+    pgsql::Error $late = .timeout;
+    assert(fault(carbon::pgsql::Driver::failure($late)) == Fault::connection);
+    pgsql::Error $none = .exhausted;
+    assert(fault(carbon::pgsql::Driver::failure($none)) == Fault::exhausted);
+}
+
+test errors_keep_the_state_and_no_number
+{
+    Error $e = carbon::pgsql::Driver::failure(server('23505'));
+    assert($e->duplicate());
+    match ($e) {
+        Error::driver($f) => {
+            assert(($f->state ?? '') == '23505');
+            assert($f->code == null);
+            assert($f->message->contains('refused'));
+        },
+        else => {
+            assert(false);
+        },
+    };
+}
+
+test params_bind_every_kind
+{
+    hydrahon::Params $from = hydrahon::Params::from([
+        hydrahon::Value::none,
+        hydrahon::Value::from(true),
+        hydrahon::Value::from(7),
+        hydrahon::Value::uint(8),
+        hydrahon::Value::from(1.5),
+        hydrahon::Value::from(hydrahon::Decimal('9.99')),
+        hydrahon::Value::from('text'),
+        hydrahon::Value::from(hydrahon::Bytes('raw')),
+        hydrahon::Value::from(hydrahon::Date(2024, 2, 29)),
+        hydrahon::Value::from(hydrahon::DateTime(2024, 2, 29, 23, 59, 58, 1)),
+        hydrahon::Value::from(hydrahon::Time(false, 9, 30, 0, 0)),
+    ]);
+    pgsql::Params $p = carbon::pgsql::Params::of($from);
+    assert($p->count() == 11);
+}
+
+test params_keep_what_postgres_has_no_type_for
+{
+    carbon::pgsql::Params $b = carbon::pgsql::Params();
+    // past int64 there is only NUMERIC
+    $b->uint(18446744073709551615);
+    $b->uint(5);
+    // a duration, not a time of day
+    $b->time(hydrahon::Time(true, 100, 2, 0, 0));
+    // a real boolean, not MySQL's 0 or 1
+    $b->bool(true);
+    assert(($b->values[0]->numeric() ?? '') == '18446744073709551615');
+    assert(($b->values[1]->int() ?? 0) == 5);
+    pgsql::Interval $i = guard $b->values[2]->interval();
+    assert($i->micros == 0 - 360120000000);
+    assert($b->values[3]->bool() ?? false);
+}
+
+test a_source_reads_keys_back_and_counts_matched_rows
+{
+    carbon::pgsql::Source $s = guard carbon::pgsql::Source::parse('postgres://app:secret@127.0.0.1:5432/blog');
+    assert($s->traits()->matched && $s->traits()->returning);
+    // nothing connects until a session runs a statement
+    assert($s->pool->open() == 0);
+}
+
+test a_bad_url_is_an_error_not_a_crash
+{
+    result<carbon::pgsql::Source, Error> $s = carbon::pgsql::Source::parse('mysql://nope');
+    assert($s->failed());
+}

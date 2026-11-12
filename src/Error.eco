@@ -119,7 +119,8 @@ public enum Error
     }
 
     /**
-     * Whether running the same work again can succeed: a deadlock or a lock wait timeout.
+     * Whether running the same work again can succeed: a deadlock, a lock wait timeout, or a row
+     * that changed under a snapshot.
      */
     public const function retryable() : bool
     {

@@ -1,25 +1,26 @@
-use carbon::ddl::{Table, Alter, Column, Mysql};
+use carbon::ddl::{Table, Alter, Column, Grammar, Mysql};
 use hydrahon::{Value, Date, DateTime, Time, Bytes, Decimal};
 
 /**
- * The one statement `$g` writes for `$t`, or the error's message.
+ * The statements `$g` writes for `$t`, one per line, or the error's message. A grammar whose
+ * schema changes commit one by one, as MySQL's do, must write exactly one statement.
  */
-function created(const Mysql& $g, const Table& $t) : string
+function created<G : Grammar>(const G& $g, const Table& $t) : string
 {
     array<string> $out = guard $g->create($t) else ($e) {
         return str::from($e);
     }
-    assert($out->count() == 1);
-    return $out[0];
+    assert($g->transactional() || $out->count() == 1);
+    return str::join($out, "\n");
 }
 
-function altered(const Mysql& $g, const Alter& $a) : string
+function altered<G : Grammar>(const G& $g, const Alter& $a) : string
 {
     array<string> $out = guard $g->alter($a) else ($e) {
         return str::from($e);
     }
-    assert($out->count() == 1);
-    return $out[0];
+    assert($g->transactional() || $out->count() == 1);
+    return str::join($out, "\n");
 }
 
 test a_table_is_created_with_its_columns_in_order
@@ -145,4 +146,6 @@ test tables_are_dropped_renamed_and_locked
     assert($g->lock("app's", 10) == "SELECT GET_LOCK('app''s', 10)");
     assert($g->unlock('carbon_migrations') == "SELECT RELEASE_LOCK('carbon_migrations')");
     assert(!$g->transactional());
+    // AUTO_INCREMENT moves past a key inserted by hand on its own
+    assert($g->advance('users', 'id')->count() == 0);
 }

@@ -2,14 +2,14 @@ namespace carbongen;
 
 test files_read_missing_as_empty_and_write_once
 {
-    string $dir = string::from(std::env::tmp());
+    string $dir = std::env::tmp()->string();
     int32 $pid = std::env::pid();
-    string $path = std::env::join($dir, "carbongen-sys-{$pid}.txt");
+    string $path = std::fs::join($dir, "carbongen-sys-{$pid}.txt")->string();
     assert(Sys::read($path) == '');
     assert(Sys::put($path, 'one'));
     assert(Sys::read($path) == 'one');
     // the same text again leaves the file alone and still answers true
     assert(Sys::put($path, 'one'));
     assert(Sys::put($path, 'two') && Sys::read($path) == 'two');
-    guard std::io::remove($path);
+    guard std::fs::remove($path);
 }

@@ -27,4 +27,14 @@ public interface Driver
     function begin() : status<Error>;
     function commit() : status<Error>;
     function rollback() : status<Error>;
+
+    /**
+     * Make sure the connection is not used again by anyone else, after a failure left it holding
+     * what the next one to borrow it must not inherit: a session lock a statement could not let
+     * go of. A connection borrowed from a pool is closed, so the pool drops it instead of lending
+     * it out. Nothing happens to a connection the driver owns, or with a driver that does not say.
+     */
+    function discard() : void
+    {
+    }
 }
