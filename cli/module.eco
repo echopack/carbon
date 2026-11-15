@@ -12,7 +12,7 @@
 #[version: "0.1.0"]
 #[epm::echoc: ">=0.14.0"]
 #[sources: "src/*.eco"]
-#[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
+#[requires: "echolang/libjson" { version: "^0.2", source: git "https://github.com/echolang/libjson" }]
 
 #[target: exe { name: "carbongen", entry: "main.eco" }] {
     #[sources: "main.eco"]

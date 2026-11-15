@@ -1,0 +1,38 @@
+{
+  "lockVersion": 2,
+  "packages": [
+    {
+      "name": "echolang/libjson",
+      "version": "0.2.0",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "5d101fae678e9e4e4876a42c024d9a5e1f0bad3c",
+      "sha256": "e6479aa739116ca3d921072245058a351a3ca91ab03789c2b104d1fb0fd59f24",
+      "requires": []
+    },
+    {
+      "name": "echopack/calendar",
+      "version": "0.1.2",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/calendar"
+      },
+      "rev": "b2ef806e2572fc3f363392fdb9e8cb81dc9bdc62",
+      "sha256": "f4cceef46e395e35d00e90a453dd244cc75529f2daff5643381751725ae81d18",
+      "requires": []
+    },
+    {
+      "name": "echopack/hydrahon",
+      "version": "0.1.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/hydrahon"
+      },
+      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
+      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
+      "requires": []
+    }
+  ]
+}
