@@ -1,0 +1,16 @@
+{
+  "lockVersion": 2,
+  "packages": [
+    {
+      "name": "echolang/libjson",
+      "version": "0.3.0",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "5d646d796c5ba5c60670231d80ec0f151a7598c6",
+      "sha256": "91bdc6d0a553efc11e46ff1dee29916367679ebb5f3d425b7e317ccf7407ff31",
+      "requires": []
+    }
+  ]
+}

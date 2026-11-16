@@ -11,7 +11,7 @@
 #[depends: "../.."]
 #[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
 #[requires: "echopack/calendar" { version: "^0.1", source: git "https://github.com/echopack/calendar" }]
-#[requires: "echolang/libjson" { version: "^0.2", source: git "https://github.com/echolang/libjson" }]
+#[requires: "echolang/libjson" { version: "^0.3", source: git "https://github.com/echolang/libjson" }]
 
 #[sources: "src/**/*.eco"]
 

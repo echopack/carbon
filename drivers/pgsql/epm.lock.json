@@ -2,39 +2,6 @@
   "lockVersion": 2,
   "packages": [
     {
-      "name": "echolang/libjson",
-      "version": "0.1.3",
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/echolang/libjson"
-      },
-      "rev": "b51ff583dac2efb54fcf651652af97f76ba5c9bd",
-      "sha256": "0319758a7bc1dae16929b97070475ae1aee0a1ba262dc6279b5e3f0ec637ff6b",
-      "requires": []
-    },
-    {
-      "name": "echopack/calendar",
-      "version": "0.1.2",
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/echopack/calendar"
-      },
-      "rev": "b2ef806e2572fc3f363392fdb9e8cb81dc9bdc62",
-      "sha256": "f4cceef46e395e35d00e90a453dd244cc75529f2daff5643381751725ae81d18",
-      "requires": []
-    },
-    {
-      "name": "echopack/hydrahon",
-      "version": "0.1.3",
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/echopack/hydrahon"
-      },
-      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
-      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
-      "requires": []
-    },
-    {
       "name": "echolang/libpgsql",
       "version": "0.1.1",
       "source": {
@@ -61,13 +28,46 @@
     },
     {
       "name": "echolang/libtcp",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "source": {
         "kind": "git",
         "url": "https://github.com/echolang/libtcp"
       },
-      "rev": "f57391e3041ce5e9b349252628a891fc988281c7",
-      "sha256": "fdc8eac15e739aca853d872a864c1dfb96fecfe6f375344803c382afefb0e8eb",
+      "rev": "f8449f7048514fc6cd1287db1353b3437e6f62b2",
+      "sha256": "6ce318e853ee8fd05d36820383e6f737ccb07adba0ae6f1c35d7c0b15140e558",
+      "requires": []
+    },
+    {
+      "name": "echopack/hydrahon",
+      "version": "0.1.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/hydrahon"
+      },
+      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
+      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
+      "requires": []
+    },
+    {
+      "name": "echopack/calendar",
+      "version": "0.1.2",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/calendar"
+      },
+      "rev": "b2ef806e2572fc3f363392fdb9e8cb81dc9bdc62",
+      "sha256": "f4cceef46e395e35d00e90a453dd244cc75529f2daff5643381751725ae81d18",
+      "requires": []
+    },
+    {
+      "name": "echolang/libjson",
+      "version": "0.3.0",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "5d646d796c5ba5c60670231d80ec0f151a7598c6",
+      "sha256": "91bdc6d0a553efc11e46ff1dee29916367679ebb5f3d425b7e317ccf7407ff31",
       "requires": []
     }
   ]

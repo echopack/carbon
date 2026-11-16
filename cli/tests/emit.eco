@@ -25,6 +25,12 @@ internal function wide() : string
     return str::join($all, ', ');
 }
 
+test generated_source_names_root_carbon_and_hydrahon
+{
+    string $out = emitted(wide());
+    assert($out->contains("use carbon;\nuse hydrahon;\n"));
+}
+
 test a_schema_names_the_database_everywhere
 {
     string $out = emitted(wide());

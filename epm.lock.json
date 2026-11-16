@@ -2,14 +2,14 @@
   "lockVersion": 2,
   "packages": [
     {
-      "name": "echolang/libjson",
-      "version": "0.2.0",
+      "name": "echopack/hydrahon",
+      "version": "0.1.3",
       "source": {
         "kind": "git",
-        "url": "https://github.com/echolang/libjson"
+        "url": "https://github.com/echopack/hydrahon"
       },
-      "rev": "5d101fae678e9e4e4876a42c024d9a5e1f0bad3c",
-      "sha256": "e6479aa739116ca3d921072245058a351a3ca91ab03789c2b104d1fb0fd59f24",
+      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
+      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
       "requires": []
     },
     {
@@ -24,14 +24,14 @@
       "requires": []
     },
     {
-      "name": "echopack/hydrahon",
-      "version": "0.1.3",
+      "name": "echolang/libjson",
+      "version": "0.3.0",
       "source": {
         "kind": "git",
-        "url": "https://github.com/echopack/hydrahon"
+        "url": "https://github.com/echolang/libjson"
       },
-      "rev": "7545cb2b9d0a56704cc6ae7d17cdc2c29df6b14b",
-      "sha256": "f35dfa2d0b3da2e5973aeb8c5f44dc317da95dcaa07697a71f621295196d3319",
+      "rev": "5d646d796c5ba5c60670231d80ec0f151a7598c6",
+      "sha256": "91bdc6d0a553efc11e46ff1dee29916367679ebb5f3d425b7e317ccf7407ff31",
       "requires": []
     }
   ]
