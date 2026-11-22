@@ -4,12 +4,13 @@ use hydrahon::Value;
 
 /**
  * Which database a literal is written for, where they differ: a boolean, backslashes in a
- * string, and bytes.
+ * string, bytes and decimals.
  */
 internal enum Spelling
 {
     case mysql;
     case postgres;
+    case sqlite;
 }
 
 /**
@@ -29,7 +30,7 @@ internal struct Literal
             Value::int($n) => "{$n}",
             Value::uint($n) => "{$n}",
             Value::float($n) => "{$n}",
-            Value::decimal($d) => $d->text,
+            Value::decimal($d) => Literal::decimal($d->text, $s),
             Value::text($str) => Literal::text($str, $s),
             Value::bytes($b) => Literal::bytes($b->data, $s),
             Value::date($d) => Literal::quoted(Literal::date($d->year, $d->month, $d->day)),
@@ -44,12 +45,26 @@ internal struct Literal
             return match ($s) {
                 Spelling::mysql => '1',
                 Spelling::postgres => 'TRUE',
+                Spelling::sqlite => '1',
             };
         }
         return match ($s) {
             Spelling::mysql => '0',
             Spelling::postgres => 'FALSE',
+            Spelling::sqlite => '0',
         };
+    }
+
+    /**
+     * SQLite keeps a decimal in a TEXT column, which would store a bare `12.50` as the float's
+     * `12.5`: there it goes in quoted, so its digits stay.
+     */
+    private static function decimal(const string& $digits, Spelling $s) : string
+    {
+        if ($s == Spelling::sqlite) {
+            return Literal::quoted($digits);
+        }
+        return $digits;
     }
 
     private static function bytes(const string& $data, Spelling $s) : string
@@ -58,6 +73,7 @@ internal struct Literal
         return match ($s) {
             Spelling::mysql => "X'{$digits}'",
             Spelling::postgres => "E'\\\\x{$digits}'::bytea",
+            Spelling::sqlite => "X'{$digits}'",
         };
     }
 
@@ -120,7 +136,8 @@ internal struct Literal
      * `$s` between single quotes, with quotes and backslashes doubled. MySQL's default SQL mode
      * reads a backslash as an escape. Postgres does too in an escape string (`E'...'`), which a
      * string with a backslash becomes there, and reads it the same with
-     * `standard_conforming_strings` on or off.
+     * `standard_conforming_strings` on or off. SQLite has no escapes at all: a backslash is
+     * written as it is.
      */
     internal static function text(const string& $s, Spelling $spelling) : string
     {
@@ -131,7 +148,7 @@ internal struct Literal
             uint8 $b = $s->byte($i);
             if ($b == 39) {
                 $out->append("''");
-            } else if ($b == 92) {
+            } else if ($b == 92 && $spelling != Spelling::sqlite) {
                 $out->append('\\\\');
                 $escaped = true;
             } else {

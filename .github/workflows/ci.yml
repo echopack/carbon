@@ -41,6 +41,19 @@ jobs:
           epm install
           echoc test
 
+      # macOS ships libsqlite3 with the system
+      - name: libsqlite3
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: carbon-sqlite
+        working-directory: drivers/sqlite
+        run: |
+          epm install
+          echoc test
+
       - name: carbongen
         working-directory: cli
         run: |

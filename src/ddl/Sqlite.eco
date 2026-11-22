@@ -1,0 +1,270 @@
+namespace carbon::ddl;
+
+use carbon::Error;
+use hydrahon::Value;
+
+/**
+ * SQLite 3.35 or later. Identifiers are quoted the way hydrahon's SQLite dialect quotes them, and
+ * a string literal has no escapes: only its quotes are doubled.
+ *
+ * SQLite stores by affinity, not by declared type, so the types written here are the ones whose
+ * affinity holds the value: whole numbers and booleans are INTEGER, dates and times TEXT, bytes a
+ * BLOB. A key that counts up is an `INTEGER PRIMARY KEY AUTOINCREMENT`, the one spelling SQLite
+ * counts with, so such a column is the table's key. An index is a statement of its own after the
+ * table, an unsigned column gets `CHECK (col >= 0)`.
+ *
+ * `ALTER TABLE` in SQLite adds, drops and renames columns and nothing else: changing a column or
+ * a foreign key afterwards is refused here, with the reason. Schema changes take part in
+ * transactions, and a write transaction already holds the whole file, so there is no lock to take.
+ */
+public class Sqlite : Grammar
+{
+    private hydrahon::Sqlite $dialect = hydrahon::Sqlite();
+
+    public const function create(const Table& $table) : result<array<string>, Error>
+    {
+        if ($table->columns->count() == 0) {
+            return .error(.invalid("table {$table->name} has no columns"));
+        }
+        array<string> $parts = [];
+        bool $counted = false;
+        foreach ($table->columns as const &$c) {
+            string $col = guard $this->column($c, true) else ($e) {
+                return .error($e);
+            }
+            if ($c->increments) {
+                $counted = true;
+            }
+            $parts[] = mv $col;
+        }
+        if ($table->primary->count() > 0) {
+            if ($counted) {
+                return .error(.invalid("table {$table->name}: a column that counts up is the key, so there is no other"));
+            }
+            $parts[] = "PRIMARY KEY ({$this->list($table->primary)})";
+        }
+        foreach ($table->foreigns as const &$f) {
+            $parts[] = $this->foreign($table->name, $f);
+        }
+        array<string> $all = [Literal::table($this->dialect, $table, $parts)];
+        foreach ($table->indexes as const &$i) {
+            $all[] = $this->index($table->name, $i, $table->missing);
+        }
+        return .ok($all);
+    }
+
+    /**
+     * Every change is a statement of its own, in the order of the changes: SQLite's `ALTER TABLE`
+     * makes one change at a time.
+     */
+    public const function alter(const Alter& $alter) : result<array<string>, Error>
+    {
+        if ($alter->changes->count() == 0) {
+            return .error(.invalid("altering {$alter->table} changes nothing"));
+        }
+        string $table = $this->name($alter->table);
+        array<string> $out = [];
+        foreach ($alter->changes as const &$change) {
+            match ($change) {
+                Change::add($c) => {
+                    if ($c->primary || $c->unique || $c->increments) {
+                        return .error(.invalid("column {$c->name}: SQLite adds no key, unique or counting column to a table that exists; add a unique index instead"));
+                    }
+                    if (!$c->nullable && $c->default == null) {
+                        return .error(.invalid("column {$c->name}: SQLite adds a NOT NULL column only with a default"));
+                    }
+                    string $col = guard $this->column($c, false) else ($e) {
+                        return .error($e);
+                    }
+                    $out[] = "ALTER TABLE {$table} ADD COLUMN {$col}";
+                },
+                Change::drop($name) => {
+                    $out[] = "ALTER TABLE {$table} DROP COLUMN {$this->name($name)}";
+                },
+                Change::rename($from, $to) => {
+                    $out[] = "ALTER TABLE {$table} RENAME COLUMN {$this->name($from)} TO {$this->name($to)}";
+                },
+                Change::modify($c) => {
+                    return .error(.invalid("column {$c->name}: SQLite cannot change a column; make a new table, copy the rows and rename it"));
+                },
+                Change::index($i) => {
+                    $out[] = $this->index($alter->table, $i, false);
+                },
+                Change::dropIndex($name) => {
+                    $out[] = "DROP INDEX {$this->name($name)}";
+                },
+                Change::foreign($f) => {
+                    return .error(.invalid("table {$alter->table}: SQLite adds foreign keys only when it creates the table"));
+                },
+                Change::dropForeign($name) => {
+                    return .error(.invalid("table {$alter->table}: SQLite drops foreign keys only with the table"));
+                },
+            };
+        }
+        return .ok($out);
+    }
+
+    public const function drop(const string& $table, bool $exists = false) : string
+    {
+        return Literal::drop($this->dialect, $table, $exists);
+    }
+
+    public const function rename(const string& $from, const string& $to) : string
+    {
+        return "ALTER TABLE {$this->name($from)} RENAME TO {$this->name($to)}";
+    }
+
+    /**
+     * None: a migration's write transaction holds the whole database already.
+     */
+    public const function lock(const string& $name, uint32 $seconds) : string
+    {
+        return '';
+    }
+
+    public const function unlock(const string& $name) : string
+    {
+        return '';
+    }
+
+    public const function transactional() : bool
+    {
+        return true;
+    }
+
+    /**
+     * The column's definition. `$creating` says whether it is part of `CREATE TABLE`, the only
+     * place a key that counts up can be declared.
+     */
+    private const function column(const Column& $c, bool $creating) : result<string, Error>
+    {
+        if ($c->unsigned && !$c->kind->integer()) {
+            return .error(.invalid("column {$c->name}: only a whole number can be unsigned"));
+        }
+        string $name = $this->name($c->name);
+        if ($c->increments) {
+            if (!$c->kind->integer()) {
+                return .error(.invalid("column {$c->name}: only a whole number can count up"));
+            }
+            if ($c->nullable || $c->default != null) {
+                return .error(.invalid("column {$c->name}: a column that counts up takes no NULL and no default"));
+            }
+            return .ok("{$name} INTEGER PRIMARY KEY AUTOINCREMENT");
+        }
+        string $type = guard Sqlite::type($c) else ($e) {
+            return .error($e);
+        }
+        string $out = "{$name} {$type}";
+        if ($c->nullable) {
+            $out->append(' NULL');
+        } else {
+            $out->append(' NOT NULL');
+        }
+        hydrahon::Value? $given = $c->default;
+        if ($given != null) {
+            hydrahon::Value $v = guard $given;
+            string $literal = Sqlite::value($v);
+            $out->append(" DEFAULT {$literal}");
+        }
+        if ($c->primary) {
+            $out->append(' PRIMARY KEY');
+        }
+        if ($c->unique) {
+            $out->append(' UNIQUE');
+        }
+        if ($c->unsigned) {
+            $out->append(" CHECK ({$name} >= 0)");
+        }
+        return .ok($out);
+    }
+
+    private static function type(const Column& $c) : result<string, Error>
+    {
+        return match ($c->kind) {
+            Kind::bigint => .ok('INTEGER'),
+            Kind::int => .ok('INTEGER'),
+            Kind::smallint => .ok('INTEGER'),
+            Kind::tinyint => .ok('INTEGER'),
+            Kind::bool => .ok('INTEGER'),
+            Kind::string($size) => Sqlite::varchar($c->name, $size),
+            Kind::text => .ok('TEXT'),
+            Kind::json => .ok('TEXT'),
+            Kind::decimal($p, $s) => Sqlite::numeric($c->name, $p, $s),
+            Kind::float => .ok('REAL'),
+            Kind::double => .ok('REAL'),
+            Kind::date => .ok('TEXT'),
+            Kind::datetime => .ok('TEXT'),
+            Kind::time => .ok('TEXT'),
+            Kind::bytes => .ok('BLOB'),
+        };
+    }
+
+    /**
+     * A VARCHAR, which SQLite stores as TEXT of any length; the size is checked so a schema stays
+     * one other databases take.
+     */
+    private static function varchar(const string& $column, uint32 $size) : result<string, Error>
+    {
+        if ($size == 0) {
+            return .error(.invalid("column {$column}: a string holds at least 1 character"));
+        }
+        return .ok("VARCHAR({$size})");
+    }
+
+    /**
+     * A decimal is kept as TEXT, so its digits come back as they went in; NUMERIC affinity would
+     * turn it into a float.
+     */
+    private static function numeric(const string& $column, uint8 $precision, uint8 $scale) : result<string, Error>
+    {
+        if ($precision == 0 || $scale > $precision) {
+            return .error(.invalid("column {$column}: DECIMAL({$precision},{$scale}) needs at least 1 digit and a scale of no more than the digits"));
+        }
+        return .ok('TEXT');
+    }
+
+    private const function index(const string& $table, const Index& $i, bool $missing) : string
+    {
+        string $out = 'CREATE ';
+        if ($i->unique) {
+            $out->append('UNIQUE ');
+        }
+        $out->append('INDEX ');
+        if ($missing) {
+            $out->append('IF NOT EXISTS ');
+        }
+        $out->append("{$this->name($i->named($table))} ON {$this->name($table)} ({$this->list($i->columns)})");
+        return $out;
+    }
+
+    private const function foreign(const string& $table, const Foreign& $f) : string
+    {
+        return Literal::foreign($this->dialect, $table, $f);
+    }
+
+    private const function name(const string& $ident) : string
+    {
+        return Literal::name($this->dialect, $ident);
+    }
+
+    private const function list(const array<string>& $names) : string
+    {
+        return Literal::list($this->dialect, $names);
+    }
+
+    /**
+     * `$v` as an SQL literal, for a default: DDL takes no bound parameters.
+     */
+    public static function value(const Value& $v) : string
+    {
+        return Literal::value($v, .sqlite);
+    }
+
+    /**
+     * `$s` between single quotes, with quotes doubled.
+     */
+    public static function literal(const string& $s) : string
+    {
+        return Literal::text($s, .sqlite);
+    }
+}

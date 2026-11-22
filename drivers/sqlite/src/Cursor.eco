@@ -1,0 +1,101 @@
+namespace carbon::sqlite;
+
+/**
+ * Rows of one statement, read as SQLite steps to them. Dropping the cursor finalizes the
+ * statement.
+ */
+internal class Cursor : carbon::Cursor
+{
+    internal sqlite::Statement $statement;
+
+    public function step() : result<bool, Error>
+    {
+        bool $more = guard $this->statement->step() else ($e) { return .error(Driver::failure($e)); }
+        return .ok($more);
+    }
+
+    public const function isNull(usize $at) : bool
+    {
+        return $this->statement->isNull($at);
+    }
+
+    /**
+     * SQLite has no booleans: a whole number that is not 0.
+     */
+    public const function bool(usize $at) : bool?
+    {
+        int64 $n = guard $this->int($at) else { return null; }
+        return $n != 0;
+    }
+
+    public const function int(usize $at) : int64?
+    {
+        sqlite::Kind $k = $this->statement->kind($at);
+        if ($k != sqlite::Kind::int && $k != sqlite::Kind::float) {
+            return null;
+        }
+        return $this->statement->int($at);
+    }
+
+    /**
+     * SQLite has no unsigned integers: a whole number that is not negative.
+     */
+    public const function uint(usize $at) : uint64?
+    {
+        int64 $n = guard $this->int($at) else { return null; }
+        if ($n < 0) {
+            return null;
+        }
+        return $n as uint64;
+    }
+
+    public const function float(usize $at) : float64?
+    {
+        sqlite::Kind $k = $this->statement->kind($at);
+        if ($k != sqlite::Kind::int && $k != sqlite::Kind::float) {
+            return null;
+        }
+        return $this->statement->float($at);
+    }
+
+    public const function text(usize $at) : string?
+    {
+        if ($this->statement->kind($at) == sqlite::Kind::blob) {
+            return null;
+        }
+        return $this->statement->text($at);
+    }
+
+    /**
+     * A decimal kept as text, or a number SQLite stored, as it prints it.
+     */
+    public const function decimal(usize $at) : hydrahon::Decimal?
+    {
+        string $digits = guard $this->statement->text($at) else { return null; }
+        return hydrahon::Decimal(mv $digits);
+    }
+
+    public const function bytes(usize $at) : hydrahon::Bytes?
+    {
+        string $data = guard $this->statement->blob($at) else { return null; }
+        return hydrahon::Bytes(mv $data);
+    }
+
+    public const function date(usize $at) : hydrahon::Date?
+    {
+        string $s = guard $this->text($at) else { return null; }
+        return Iso::date($s);
+    }
+
+    public const function datetime(usize $at) : hydrahon::DateTime?
+    {
+        string $s = guard $this->text($at) else { return null; }
+        return Iso::datetime($s);
+    }
+
+    public const function time(usize $at) : hydrahon::Time?
+    {
+        string $s = guard $this->text($at) else { return null; }
+        return Iso::time($s);
+    }
+}

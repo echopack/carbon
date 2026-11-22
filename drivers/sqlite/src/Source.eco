@@ -1,0 +1,42 @@
+namespace carbon::sqlite;
+
+use std::time;
+
+/**
+ * carbon on one SQLite file with a connection per session. A session opens its own with its
+ * first statement and closes it when it is gone, so the transactions of two sessions, or two
+ * threads, never mix; SQLite lets one of them write at a time.
+ *
+ * ```echo
+ * carbon::sqlite::Source $source = carbon::sqlite::Source('/data/app.sqlite');
+ * carbon::DB $db = carbon::DB($source);
+ * guard $db->register<PostRepository>();
+ * ```
+ *
+ * Every connection runs in WAL mode, so readers never wait for the writer, with foreign keys on
+ * and `$wait` as its busy timeout: a writer waits that long for another to finish.
+ */
+#[atomic]
+public class Source : carbon::Source
+{
+    public std::fs::path $path;
+    public time::duration $wait;
+
+    public constructor(std::fs::path $path, wait: time::duration $wait = .secs(10))
+    {
+        $this->path = $path;
+        $this->wait = $wait;
+    }
+
+    public function open() : result<carbon::Driver, Error>
+    {
+        Driver $d = guard Driver::open($this->path, wait: $this->wait) else ($e) { return .error($e); }
+        carbon::Driver $out = $d;
+        return .ok($out);
+    }
+
+    public const function traits() : Traits
+    {
+        return Traits(true, true);
+    }
+}

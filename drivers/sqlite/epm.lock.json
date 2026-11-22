@@ -1,0 +1,49 @@
+{
+  "lockVersion": 2,
+  "packages": [
+    {
+      "name": "echolang/libjson",
+      "version": "0.3.0",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "5d646d796c5ba5c60670231d80ec0f151a7598c6",
+      "sha256": "91bdc6d0a553efc11e46ff1dee29916367679ebb5f3d425b7e317ccf7407ff31",
+      "requires": []
+    },
+    {
+      "name": "echopack/calendar",
+      "version": "0.1.2",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/calendar"
+      },
+      "rev": "b2ef806e2572fc3f363392fdb9e8cb81dc9bdc62",
+      "sha256": "f4cceef46e395e35d00e90a453dd244cc75529f2daff5643381751725ae81d18",
+      "requires": []
+    },
+    {
+      "name": "echopack/hydrahon",
+      "version": "0.1.4",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echopack/hydrahon"
+      },
+      "rev": "f34df4c2dc7869394374118a8533f6fe381fd23a",
+      "sha256": "0286a7f8e7714702ac5ef55dc124b1f3dc779210d2b2093586ed07b736f2d7f6",
+      "requires": []
+    },
+    {
+      "name": "echolang/libsqlite",
+      "version": "0.1.1",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libsqlite"
+      },
+      "rev": "6cd0c63fd6a99101368f19dba31897fdbd9c1df3",
+      "sha256": "5ff297e9264f2acb1c36fd2efb169bfd53facd75bb6d7e09d141e1d783b9f270",
+      "requires": []
+    }
+  ]
+}

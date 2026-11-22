@@ -1,0 +1,24 @@
+/*
+ * carbon-sqlite: carbon's driver for SQLite, on libsqlite.
+ *
+ * Renders hydrahon statements in the SQLite dialect, binds their parameters, steps through rows
+ * and maps SQLite's result codes onto carbon's faults. Inserted keys come back through RETURNING,
+ * and an UPDATE counts the rows it matched, so stale writes are noticed without asking. Dates
+ * and times are stored as ISO text, which SQLite's own date functions read.
+ */
+
+#[module: "carbon-sqlite"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "the sqlite driver for carbon, on libsqlite"]
+
+#[depends: "../.."]
+#[requires: "echopack/hydrahon" { version: "^0.1", source: git "https://github.com/echopack/hydrahon" }]
+#[requires: "echopack/calendar" { version: "^0.1", source: git "https://github.com/echopack/calendar" }]
+#[requires: "echolang/libsqlite" { version: "^0.1.1", source: git "https://github.com/echolang/libsqlite" }]
+
+#[sources: "src/*.eco"]
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

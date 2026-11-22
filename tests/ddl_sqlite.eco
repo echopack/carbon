@@ -1,0 +1,89 @@
+use carbon::ddl::{Table, Alter, Column, Sqlite};
+use hydrahon::{Value, Date, Bytes, Decimal};
+
+test sqlite_creates_a_table_with_a_counting_key
+{
+    Table $users = Table('users')
+        ->id()
+        ->string('email', 190, $unique: true)
+        ->bool('admin', $default: false)
+        ->timestamps();
+    assert(created(Sqlite(), $users) == 'CREATE TABLE "users" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "email" VARCHAR(190) NOT NULL UNIQUE, "admin" INTEGER NOT NULL DEFAULT 0, "created_at" TEXT NULL, "updated_at" TEXT NULL)');
+}
+
+test sqlite_writes_indexes_and_foreign_keys
+{
+    Table $posts = Table('posts')
+        ->id()
+        ->bigint('author_id')
+        ->tinyint('status', $default: 0, $unsigned: true)
+        ->json('meta')
+        ->index(['author_id', 'status'])
+        ->unique(['author_id', 'meta'], $name: 'one_meta')
+        ->foreign('author_id', 'users', $onDelete: .cascade);
+    array<string> $want = [
+        'CREATE TABLE "posts" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "author_id" INTEGER NOT NULL, "status" INTEGER NOT NULL DEFAULT 0 CHECK ("status" >= 0), "meta" TEXT NOT NULL, CONSTRAINT "posts_author_id_foreign" FOREIGN KEY ("author_id") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE RESTRICT)',
+        'CREATE INDEX "posts_author_id_status_index" ON "posts" ("author_id", "status")',
+        'CREATE UNIQUE INDEX "one_meta" ON "posts" ("author_id", "meta")',
+    ];
+    assert(created(Sqlite(), $posts) == str::join($want, "\n"));
+}
+
+test sqlite_keeps_a_composite_key_and_every_kind
+{
+    Table $all = Table('kinds')
+        ->string('k', 16)
+        ->int('a', $nullable: true)
+        ->decimal('d', 8, 3)
+        ->double('f')
+        ->date('g')
+        ->datetime('h')
+        ->time('i')
+        ->bytes('j')
+        ->primary(['k', 'a'])
+        ->ifMissing();
+    assert(created(Sqlite(), $all) == 'CREATE TABLE IF NOT EXISTS "kinds" ("k" VARCHAR(16) NOT NULL, "a" INTEGER NULL, "d" TEXT NOT NULL, "f" REAL NOT NULL, "g" TEXT NOT NULL, "h" TEXT NOT NULL, "i" TEXT NOT NULL, "j" BLOB NOT NULL, PRIMARY KEY ("k", "a"))');
+}
+
+test sqlite_writes_literals_without_escapes
+{
+    assert(Sqlite::value(Value::from(true)) == '1');
+    assert(Sqlite::value(Value::from("it's a \\ path")) == "'it''s a \\ path'");
+    assert(Sqlite::value(Value::from(Bytes("\x01\x7F"))) == "X'017F'");
+    assert(Sqlite::value(Value::from(Date(2026, 1, 9))) == "'2026-01-09'");
+    // a TEXT column would keep a bare 12.50 as 12.5
+    assert(Sqlite::value(Value::from(Decimal('12.50'))) == "'12.50'");
+}
+
+test sqlite_alters_one_change_at_a_time
+{
+    Alter $a = Alter('t')
+        ->add(Column('note', .text, true))
+        ->rename('old', 'new')
+        ->drop('gone')
+        ->index(['note'])
+        ->dropIndex('t_x_index');
+    array<string> $want = [
+        'ALTER TABLE "t" ADD COLUMN "note" TEXT NULL',
+        'ALTER TABLE "t" RENAME COLUMN "old" TO "new"',
+        'ALTER TABLE "t" DROP COLUMN "gone"',
+        'CREATE INDEX "t_note_index" ON "t" ("note")',
+        'DROP INDEX "t_x_index"',
+    ];
+    assert(altered(Sqlite(), $a) == str::join($want, "\n"));
+    assert(Sqlite()->rename('a', 'b') == 'ALTER TABLE "a" RENAME TO "b"');
+    assert(Sqlite()->drop('a', true) == 'DROP TABLE IF EXISTS "a"');
+    assert(Sqlite()->lock('m', 5) == '');
+    assert(Sqlite()->transactional());
+}
+
+test what_sqlite_cannot_express_is_refused
+{
+    assert(altered(Sqlite(), Alter('t')->modify(Column('c', .int, false))) == 'invalid: column c: SQLite cannot change a column; make a new table, copy the rows and rename it');
+    assert(altered(Sqlite(), Alter('t')->add(Column('c', .int, false))) == 'invalid: column c: SQLite adds a NOT NULL column only with a default');
+    assert(altered(Sqlite(), Alter('t')->dropForeign('f')) == 'invalid: table t: SQLite drops foreign keys only with the table');
+    assert(created(Sqlite(), Table('t')->id()->bigint('x')->primary(['x'])) == 'invalid: table t: a column that counts up is the key, so there is no other');
+    Column $count = Column('s', .string(8));
+    $count->increments = true;
+    assert(created(Sqlite(), Table('t')->add($count)) == 'invalid: column s: only a whole number can count up');
+}

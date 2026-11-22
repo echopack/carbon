@@ -1,0 +1,238 @@
+use carbon::{DB, Error, Fault, Migration, Migrating, Migrator, Statement, Written};
+use carbon::ddl::{Table, Alter};
+use carbon::migrate::Step;
+use hydrahon::{Value, Date, DateTime, Time, Bytes, Decimal};
+use std::time;
+use std::thread;
+
+class CreateThings : Migration
+{
+    public function up(Migrating $m) : status<Error>
+    {
+        return $m->create(Table('things')->id()->string('name', 64, $unique: true)->int('hits', $default: 0));
+    }
+
+    public function down(Migrating $m) : status<Error>
+    {
+        return $m->drop('things');
+    }
+}
+
+class AddNote : Migration
+{
+    public function up(Migrating $m) : status<Error>
+    {
+        return $m->alter(Alter('things')->text('note', $nullable: true));
+    }
+
+    public function down(Migrating $m) : status<Error>
+    {
+        return $m->alter(Alter('things')->drop('note'));
+    }
+}
+
+function steps() : array<Step>
+{
+    array<Step> $all = [
+        Step('20261122000001_create_things', CreateThings(), true),
+        Step('20261122000002_add_note', AddNote(), true),
+    ];
+    return $all;
+}
+
+function file(const string& $name) : std::fs::path
+{
+    std::fs::path $dir = guard std::fs::tempdir() else ($e) { die("no temporary folder: {$e}"); };
+    return $dir / $name;
+}
+
+function sql(const string& $text, array<Value> $values) : Statement
+{
+    return Statement(hydrahon::Sql($text, hydrahon::Params::from($values)));
+}
+
+function scalar(carbon::sqlite::Driver $d, const string& $text) : int64
+{
+    carbon::Cursor $c = guard $d->query(Statement(plain: $text)) else ($e) { die("{$e}"); };
+    guard $c->step() else ($e) { die("{$e}"); };
+    return $c->int(0) ?? -1;
+}
+
+function faultOf(int32 $code) : Fault
+{
+    return carbon::sqlite::Driver::failure(sqlite::Error($code, 'x'))->fault();
+}
+
+test errors_map_onto_faults
+{
+    assert(faultOf(2067) == Fault::duplicate);
+    assert(faultOf(1555) == Fault::duplicate);
+    assert(faultOf(787) == Fault::reference);
+    assert(faultOf(1299) == Fault::constraint);
+    assert(faultOf(275) == Fault::constraint);
+    assert(faultOf(5) == Fault::deadlock);
+    assert(faultOf(517) == Fault::deadlock);
+    assert(faultOf(14) == Fault::connection);
+    assert(faultOf(13) == Fault::exhausted);
+    assert(faultOf(1) == Fault::other);
+    match (carbon::sqlite::Driver::failure(sqlite::Error(2067, 'UNIQUE constraint failed'))) {
+        Error::driver($f) => {
+            assert(($f->code ?? 0) == 2067);
+            assert($f->state == null);
+            assert($f->message->contains('UNIQUE'));
+        },
+        else => { assert(false); },
+    };
+}
+
+test every_kind_round_trips
+{
+    carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::memory();
+    guard $d->exec(Statement(plain: 'CREATE TABLE k (b INTEGER, i INTEGER, u TEXT, f REAL, d TEXT, s TEXT, y BLOB, dt TEXT, ts TEXT, t TEXT, n TEXT)'));
+    Written $w = guard $d->exec(sql('INSERT INTO k VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+        Value::from(true),
+        Value::from(-7 as int64),
+        // past int64 an INTEGER column would turn it into a float
+        Value::uint(18446744073709551615),
+        Value::from(1.5),
+        Value::from(Decimal('12.50')),
+        Value::from("it's"),
+        Value::from(Bytes("\x00\x01")),
+        Value::from(Date(2026, 11, 22)),
+        Value::from(DateTime(2026, 11, 22, 8, 5, 3, 120)),
+        Value::from(Time(true, 30, 15, 0, 0)),
+        Value::none,
+    ]));
+    assert($w->affected == 1);
+    assert($w->insertId == 1);
+    carbon::Cursor $c = guard $d->query(Statement(plain: 'SELECT b, i, u, f, d, s, y, dt, ts, t, n FROM k'));
+    bool $row = guard $c->step();
+    assert($row);
+    assert(($c->bool(0) ?? false) == true);
+    assert(($c->int(1) ?? 0) == -7);
+    assert(($c->text(2) ?? '') == '18446744073709551615');
+    assert(($c->float(3) ?? 0.0) == 1.5);
+    assert(($c->decimal(4) ?? Decimal('0'))->text == '12.50');
+    assert(($c->text(5) ?? '') == "it's");
+    assert(($c->bytes(6) ?? Bytes(''))->data == "\x00\x01");
+    hydrahon::Date $date = guard $c->date(7);
+    assert($date->year == 2026 && $date->month == 11 && $date->day == 22);
+    hydrahon::DateTime $stamp = guard $c->datetime(8);
+    assert($stamp->hour == 8 && $stamp->minute == 5 && $stamp->second == 3 && $stamp->micro == 120);
+    assert(($c->text(8) ?? '') == '2026-11-22 08:05:03.000120');
+    hydrahon::Time $t = guard $c->time(9);
+    assert($t->negative && $t->hours == 30 && $t->minute == 15);
+    assert($c->isNull(10));
+    assert($c->int(10) == null);
+    assert($c->text(6) == null);
+    bool $more = guard $c->step();
+    assert(!$more);
+}
+
+test iso_text_is_read_strictly
+{
+    carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::memory();
+    carbon::Cursor $c = guard $d->query(Statement(plain: "SELECT '2026-02-30x', '2026-11-22T10:00:00Z', 'nope', '2026-11-22', '2026-02-30', '2028-02-29', '2026-13-01', '9999999999:00:00'"));
+    guard $c->step();
+    assert($c->datetime(0) == null);
+    assert($c->date(0) == null);
+    assert($c->date(4) == null);
+    assert($c->date(6) == null);
+    assert($c->time(7) == null);
+    hydrahon::Date $leap = guard $c->date(5);
+    assert($leap->month == 2 && $leap->day == 29);
+    hydrahon::Date $ofStamp = guard $c->date(1);
+    assert($ofStamp->day == 22);
+    hydrahon::DateTime $t = guard $c->datetime(1);
+    assert($t->hour == 10);
+    assert($c->date(2) == null);
+    hydrahon::DateTime $midnight = guard $c->datetime(3);
+    assert($midnight->hour == 0 && $midnight->day == 22);
+}
+
+test migrations_run_and_roll_back_on_a_file
+{
+    std::fs::path $path = file('migrate.sqlite');
+    DB $db = DB(carbon::sqlite::Source($path));
+    Migrator $m = Migrator($db, steps(), carbon::ddl::Sqlite());
+    array<string> $ran = guard $m->up();
+    assert($ran->count() == 2);
+    array<string> $again = guard $m->up();
+    assert($again->count() == 0);
+
+    carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::open($path);
+    guard $d->exec(sql('INSERT INTO things (name, note) VALUES (?, ?)', [Value::from('a'), Value::from('first')]));
+    result<Written, Error> $dup = $d->exec(sql('INSERT INTO things (name) VALUES (?)', [Value::from('a')]));
+    match ($dup) {
+        .error($e) => { assert($e->duplicate()); },
+        else => { assert(false); },
+    };
+    assert(scalar($d, 'SELECT count(*) FROM things') == 1);
+
+    guard $m->down();
+    assert(scalar($d, "SELECT count(*) FROM pragma_table_info('things') WHERE name = 'note'") == 0);
+    guard $m->down();
+    assert(scalar($d, "SELECT count(*) FROM sqlite_master WHERE name = 'things'") == 0);
+}
+
+test an_update_counts_the_rows_it_matched
+{
+    carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::memory();
+    guard $d->exec(Statement(plain: "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t (v) VALUES ('same')"));
+    Written $same = guard $d->exec(sql('UPDATE t SET v = ? WHERE id = ?', [Value::from('same'), Value::from(1 as int64)]));
+    assert($same->affected == 1);
+    Written $none = guard $d->exec(sql('UPDATE t SET v = ? WHERE id = ?', [Value::from('x'), Value::from(9 as int64)]));
+    assert($none->affected == 0);
+    carbon::Cursor $back = guard $d->query(sql('INSERT INTO t (v) VALUES (?) RETURNING id', [Value::from('new')]));
+    guard $back->step();
+    assert(($back->int(0) ?? 0) == 2);
+}
+
+test transactions_commit_roll_back_and_refuse_nesting
+{
+    carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::memory();
+    guard $d->exec(Statement(plain: 'CREATE TABLE t (v INTEGER)'));
+    guard $d->begin();
+    assert($d->begin()->failed());
+    guard $d->exec(Statement(plain: 'INSERT INTO t VALUES (1)'));
+    guard $d->rollback();
+    guard $d->begin();
+    guard $d->exec(Statement(plain: 'INSERT INTO t VALUES (2)'));
+    guard $d->commit();
+    assert($d->commit()->failed());
+    assert(scalar($d, 'SELECT sum(v) FROM t') == 2);
+    // a transaction SQLite already ended still rolls back cleanly
+    guard $d->begin();
+    guard $d->exec(Statement(plain: 'ROLLBACK'));
+    guard $d->rollback();
+}
+
+test immediate_transactions_lose_no_updates_across_threads
+{
+    std::fs::path $path = file('counter.sqlite');
+    carbon::sqlite::Driver $setup = guard carbon::sqlite::Driver::open($path);
+    guard $setup->exec(Statement(plain: 'CREATE TABLE c (n INTEGER); INSERT INTO c VALUES (0)'));
+    array<thread::handle> $workers = [];
+    int32 $w = 0;
+    while ($w < 4) {
+        thread::handle $h = guard thread::spawn(function[$path]() : void {
+            carbon::sqlite::Driver $d = guard carbon::sqlite::Driver::open($path, wait: time::duration::secs(30)) else ($e) { die("{$e}"); };
+            int32 $i = 0;
+            while ($i < 50) {
+                guard $d->begin() else ($e) { die("{$e}"); };
+                carbon::Cursor $c = guard $d->query(Statement(plain: 'SELECT n FROM c')) else ($e) { die("{$e}"); };
+                guard $c->step() else ($e) { die("{$e}"); };
+                int64 $n = $c->int(0) ?? 0;
+                guard $d->exec(sql('UPDATE c SET n = ?', [Value::from($n + 1)])) else ($e) { die("{$e}"); };
+                guard $d->commit() else ($e) { die("{$e}"); };
+                $i++;
+            }
+        });
+        $workers[] = $h;
+        $w++;
+    }
+    foreach ($workers as &$h) {
+        $h->join();
+    }
+    assert(scalar($setup, 'SELECT n FROM c') == 200);
+}

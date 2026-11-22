@@ -1,0 +1,199 @@
+namespace carbon::sqlite;
+
+/**
+ * Dates and times as the text SQLite keeps them in: `2026-11-22`, `2026-11-22 08:05:03` with
+ * `.000120` when there are microseconds, and `[-]09:30:00` for a time, whose hours may go past a
+ * day. SQLite's date functions read the first two.
+ */
+internal struct Iso
+{
+    internal static function date(const hydrahon::Date& $d) : string
+    {
+        return Iso::day($d->year, $d->month, $d->day);
+    }
+
+    internal static function datetime(const hydrahon::DateTime& $t) : string
+    {
+        string $out = Iso::day($t->year, $t->month, $t->day);
+        $out->append(' ');
+        $out->append(Iso::clock($t->hour as uint64, $t->minute, $t->second, $t->micro));
+        return $out;
+    }
+
+    internal static function time(const hydrahon::Time& $t) : string
+    {
+        string $out = '';
+        if ($t->negative) {
+            $out->append('-');
+        }
+        $out->append(Iso::clock($t->hours as uint64, $t->minute, $t->second, $t->micro));
+        return $out;
+    }
+
+    /**
+     * `2026-11-22`, or the date of a stamp. Null for anything else.
+     */
+    internal static function date(const string& $s) : hydrahon::Date?
+    {
+        if ($s->size() == 10) {
+            return Iso::head($s);
+        }
+        hydrahon::DateTime $t = guard Iso::datetime($s) else { return null; }
+        return hydrahon::Date($t->year, $t->month, $t->day);
+    }
+
+    /**
+     * `2026-11-22 08:05:03[.ffffff]`, with a `T` between too; a date alone is its midnight.
+     */
+    internal static function datetime(const string& $s) : hydrahon::DateTime?
+    {
+        hydrahon::Date $d = guard Iso::head($s) else { return null; }
+        if ($s->size() == 10) {
+            return hydrahon::DateTime($d->year, $d->month, $d->day, 0, 0, 0, 0);
+        }
+        if ($s->size() < 19 || ($s->byte(10) != 32 && $s->byte(10) != 84)) {
+            return null;
+        }
+        string $rest = string($s->sub(11, $s->size() - 11));
+        hydrahon::Time $t = guard Iso::time($rest) else { return null; }
+        if ($t->negative || $t->hours > 23) {
+            return null;
+        }
+        return hydrahon::DateTime($d->year, $d->month, $d->day, $t->hours as uint8, $t->minute, $t->second, $t->micro);
+    }
+
+    /**
+     * `[-]H+:MM:SS[.ffffff]`, ignoring a trailing `Z`.
+     */
+    internal static function time(const string& $s) : hydrahon::Time?
+    {
+        usize $at = 0;
+        bool $negative = false;
+        if ($s->size() > 0 && $s->byte(0) == 45) {
+            $negative = true;
+            $at = 1;
+        }
+        usize $colon = $at;
+        while ($colon < $s->size() && $s->byte($colon) != 58) {
+            $colon++;
+        }
+        // nine digits of hours at most, so they fit the uint32
+        if ($colon == $at || $colon - $at > 9 || $colon + 6 > $s->size() || $s->byte($colon + 3) != 58) {
+            return null;
+        }
+        uint64 $h = guard Iso::digits($s, $at, $colon - $at) else { return null; }
+        uint64 $m = guard Iso::digits($s, $colon + 1, 2) else { return null; }
+        uint64 $sec = guard Iso::digits($s, $colon + 4, 2) else { return null; }
+        uint64 $micro = 0;
+        usize $end = $colon + 6;
+        if ($end < $s->size() && $s->byte($end) == 46) {
+            usize $i = $end + 1;
+            usize $places = 0;
+            while ($i < $s->size() && $s->byte($i) >= 48 && $s->byte($i) <= 57) {
+                if ($places < 6) {
+                    $micro = $micro * 10 + ($s->byte($i) - 48) as uint64;
+                    $places++;
+                }
+                $i++;
+            }
+            while ($places < 6) {
+                $micro = $micro * 10;
+                $places++;
+            }
+            $end = $i;
+        }
+        if ($end < $s->size() && $s->byte($end) == 90) {
+            $end++;
+        }
+        if ($end != $s->size() || $m > 59 || $sec > 59) {
+            return null;
+        }
+        return hydrahon::Time($negative, $h as uint32, $m as uint8, $sec as uint8, $micro as uint32);
+    }
+
+    /**
+     * The `YYYY-MM-DD` that `$s` starts with, when that day is on the calendar.
+     */
+    private static function head(const string& $s) : hydrahon::Date?
+    {
+        if ($s->size() < 10 || $s->byte(4) != 45 || $s->byte(7) != 45) {
+            return null;
+        }
+        uint64 $y = guard Iso::digits($s, 0, 4) else { return null; }
+        uint64 $m = guard Iso::digits($s, 5, 2) else { return null; }
+        uint64 $d = guard Iso::digits($s, 8, 2) else { return null; }
+        if ($m < 1 || $m > 12 || $d < 1 || $d > Iso::days($y, $m)) {
+            return null;
+        }
+        return hydrahon::Date($y as uint16, $m as uint8, $d as uint8);
+    }
+
+    private static function days(uint64 $year, uint64 $month) : uint64
+    {
+        if ($month == 2) {
+            if ($year % 4 == 0 && ($year % 100 != 0 || $year % 400 == 0)) {
+                return 29;
+            }
+            return 28;
+        }
+        if ($month == 4 || $month == 6 || $month == 9 || $month == 11) {
+            return 30;
+        }
+        return 31;
+    }
+
+    private static function day(uint16 $year, uint8 $month, uint8 $day) : string
+    {
+        string $out = Iso::pad($year as uint64, 4);
+        $out->append('-');
+        $out->append(Iso::pad($month as uint64, 2));
+        $out->append('-');
+        $out->append(Iso::pad($day as uint64, 2));
+        return $out;
+    }
+
+    private static function clock(uint64 $hours, uint8 $minute, uint8 $second, uint32 $micro) : string
+    {
+        string $out = Iso::pad($hours, 2);
+        $out->append(':');
+        $out->append(Iso::pad($minute as uint64, 2));
+        $out->append(':');
+        $out->append(Iso::pad($second as uint64, 2));
+        if ($micro != 0) {
+            $out->append('.');
+            $out->append(Iso::pad($micro as uint64, 6));
+        }
+        return $out;
+    }
+
+    private static function digits(const string& $s, usize $from, usize $count) : uint64?
+    {
+        if ($count == 0 || $from + $count > $s->size()) {
+            return null;
+        }
+        uint64 $n = 0;
+        usize $i = $from;
+        while ($i < $from + $count) {
+            uint8 $b = $s->byte($i);
+            if ($b < 48 || $b > 57) {
+                return null;
+            }
+            $n = $n * 10 + ($b - 48) as uint64;
+            $i++;
+        }
+        return $n;
+    }
+
+    private static function pad(uint64 $n, usize $width) : string
+    {
+        string $digits = "{$n}";
+        string $out = '';
+        usize $have = $digits->size();
+        while ($have < $width) {
+            $out->append('0');
+            $have++;
+        }
+        $out->append($digits);
+        return $out;
+    }
+}

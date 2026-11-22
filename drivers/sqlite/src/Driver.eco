@@ -1,0 +1,190 @@
+namespace carbon::sqlite;
+
+use std::time;
+
+/**
+ * carbon on SQLite, over one libsqlite connection: a script's, or one a session opened from a
+ * `Source`.
+ *
+ * ```echo
+ * carbon::sqlite::Driver $driver = guard carbon::sqlite::Driver::open('app.sqlite');
+ * carbon::DB $db = carbon::DB($driver);
+ * ```
+ *
+ * A transaction begins `IMMEDIATE`: it takes the write lock up front, so two sessions that read
+ * and then write the same row run one after the other instead of the second failing halfway.
+ */
+public class Driver : carbon::Driver
+{
+    public sqlite::Database $database;
+    internal hydrahon::Sqlite $dialect;
+    internal bool $open = false;
+
+    public constructor(sqlite::Database $database)
+    {
+        $this->database = $database;
+        $this->dialect = hydrahon::Sqlite(sqlite::Database::version());
+    }
+
+    destructor()
+    {
+        if ($this->open && !$this->database->autocommit()) {
+            $this->database->exec('ROLLBACK');
+        }
+    }
+
+    /**
+     * Open the file at `$path`, made when it is missing, in WAL mode with foreign keys on.
+     */
+    public static function open(const std::fs::path& $path, wait: time::duration $wait = .secs(10)) : result<Driver, Error>
+    {
+        sqlite::Database $db = guard sqlite::Database::open($path) else ($e) { return .error(Driver::failure($e)); }
+        return Driver::ready($db, $wait);
+    }
+
+    /**
+     * A database in memory, gone with the driver: one connection, so a `DB` on it is a script's
+     * or a test's.
+     */
+    public static function memory() : result<Driver, Error>
+    {
+        sqlite::Database $db = guard sqlite::Database::memory() else ($e) { return .error(Driver::failure($e)); }
+        return Driver::ready($db, .secs(1));
+    }
+
+    public const function render(const hydrahon::Select& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Insert& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Update& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public const function render(const hydrahon::Delete& $q) : result<hydrahon::Sql, hydrahon::Error>
+    {
+        return $q->sql($this->dialect);
+    }
+
+    public function query(const Statement& $s) : result<carbon::Cursor, Error>
+    {
+        sqlite::Statement $st = guard $this->prepare($s) else ($e) { return .error($e); }
+        carbon::Cursor $c = Cursor($st);
+        return .ok($c);
+    }
+
+    /**
+     * What the statement did: the rows it changed (matched, for an UPDATE) and the rowid of the
+     * last insert. Without parameters the text may hold several statements, as a migration's does.
+     */
+    public function exec(const Statement& $s) : result<Written, Error>
+    {
+        if ($s->params->count() == 0) {
+            guard $this->database->exec($s->text) else ($e) { return .error(Driver::failure($e)); }
+        } else {
+            sqlite::Statement $st = guard $this->prepare($s) else ($e) { return .error($e); }
+            guard $st->run() else ($e) { return .error(Driver::failure($e)); }
+        }
+        return .ok(Written($this->database->changes() as uint64, $this->database->lastInsertId() as uint64));
+    }
+
+    /**
+     * Keys come back through RETURNING, and an UPDATE counts the rows it matched.
+     */
+    public const function traits() : Traits
+    {
+        return Traits(true, true);
+    }
+
+    public function begin() : status<Error>
+    {
+        if ($this->open) {
+            return .error(.nested);
+        }
+        guard $this->database->exec('BEGIN IMMEDIATE') else ($e) { return .error(Driver::failure($e)); }
+        $this->open = true;
+        return .ok();
+    }
+
+    public function commit() : status<Error>
+    {
+        if (!$this->open) {
+            return .error(.invalid('no transaction is open'));
+        }
+        $this->open = false;
+        guard $this->database->exec('COMMIT') else ($e) {
+            $this->database->exec('ROLLBACK');
+            return .error(Driver::failure($e));
+        }
+        return .ok();
+    }
+
+    public function rollback() : status<Error>
+    {
+        if (!$this->open) {
+            return .error(.invalid('no transaction is open'));
+        }
+        $this->open = false;
+        if ($this->database->autocommit()) {
+            // SQLite rolled it back itself, after a full disk, an I/O error or no memory
+            return .ok();
+        }
+        guard $this->database->exec('ROLLBACK') else ($e) { return .error(Driver::failure($e)); }
+        return .ok();
+    }
+
+    /**
+     * A libsqlite error in carbon's terms, sorted by its result code. SQLite has no SQLSTATE, so
+     * the failure carries the extended code alone.
+     */
+    public static function failure(const sqlite::Error& $e) : Error
+    {
+        return .driver(Failure(Driver::fault($e), $e->message, null, $e->code as int64));
+    }
+
+    private static function ready(sqlite::Database $db, time::duration $wait) : result<Driver, Error>
+    {
+        $db->busyTimeout($wait);
+        guard $db->exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON') else ($e) {
+            return .error(Driver::failure($e));
+        }
+        return .ok(Driver($db));
+    }
+
+    private function prepare(const Statement& $s) : result<sqlite::Statement, Error>
+    {
+        sqlite::Statement $st = guard $this->database->prepare($s->text) else ($e) { return .error(Driver::failure($e)); }
+        array<sqlite::Value> $values = Params::of($s->params);
+        guard $st->bind($values) else ($e) { return .error(Driver::failure($e)); }
+        return .ok($st);
+    }
+
+    private static function fault(const sqlite::Error& $e) : Fault
+    {
+        if ($e->unique()) {
+            return .duplicate;
+        }
+        if ($e->foreignKey()) {
+            return .reference;
+        }
+        if ($e->is(.constraint)) {
+            return .constraint;
+        }
+        if ($e->busy()) {
+            return .deadlock;
+        }
+        if ($e->is(.cannotOpen) || $e->is(.io) || $e->is(.notADatabase) || $e->is(.corrupt)) {
+            return .connection;
+        }
+        if ($e->is(.full) || $e->is(.noMemory)) {
+            return .exhausted;
+        }
+        return .other;
+    }
+}
